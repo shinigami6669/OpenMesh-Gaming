@@ -1,0 +1,35 @@
+# Binaries and Installers
+*.exe
+*.msi
+*.dll
+*.so
+*.dylib
+*.moon
+
+# ZeroTier Secrets and Keys
+authtoken.secret
+identity.secret
+*.secret
+*.key
+
+# Runtime and Local Config
+config.json
+current_ip.txt
+banned_members.json
+openmesh_client_config.json
+OpenMesh_config.json
+*.log
+
+# Compiler and Build artifacts
+*.obj
+*.pdb
+*.rsp
+bin/
+obj/
+__pycache__/
+*.pyc
+
+# OS specific files
+.DS_Store
+Thumbs.db
+desktop.ini

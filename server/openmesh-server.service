@@ -1,0 +1,15 @@
+[Unit]
+Description=OpenMesh Gaming Controller and Autonomous Moon Sync
+After=network.target zerotier-one.service
+Wants=zerotier-one.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/openmesh
+ExecStart=/usr/bin/python3 /opt/openmesh/server.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

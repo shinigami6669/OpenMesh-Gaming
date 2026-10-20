@@ -1,0 +1,9 @@
+{
+  "web_port": 8080,
+  "zt_port": 9993,
+  "public_ip": "",
+  "admin_user": "admin",
+  "admin_pass": "ChangeThisPassword123!",
+  "network_id": "",
+  "server_virtual_ip": "10.147.20.177"
+}
