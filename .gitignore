@@ -26,6 +26,7 @@ OpenMesh_config.json
 *.rsp
 bin/
 obj/
+build_artifacts/
 __pycache__/
 *.pyc
 
