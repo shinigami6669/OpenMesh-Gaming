@@ -52,6 +52,8 @@ namespace OpenMesh.Gaming.Client
         private Timer pingTimer;
         private bool isConnected = false;
         private bool isBusy = false;
+        private bool isConnecting = false;
+        private System.Threading.CancellationTokenSource ctsConnect = null;
         private bool isBanned = false;
         private long lastHandledKickTs = 0;
         private string localNodeId = "";
@@ -379,7 +381,6 @@ namespace OpenMesh.Gaming.Client
 
         private async Task ToggleConnectionAsync()
         {
-            if (isBusy) return;
             if (isBanned)
             {
                 bool srvBanned = await Task.Run(() => VerifyServerBannedState());
@@ -393,14 +394,32 @@ namespace OpenMesh.Gaming.Client
                     SetBannedState(false, "Verified not banned");
                 }
             }
-            isBusy = true;
-            btnConnect.Enabled = false;
-            progressBar.Visible = true;
-            progressBar.Style = ProgressBarStyle.Marquee;
 
-            try
+            // 1. If currently connecting, user clicked CANCEL!
+            if (isConnecting)
             {
-                if (isConnected)
+                Log("Cancelling connection attempt...", Color.FromArgb(245, 158, 11));
+                btnConnect.Text = "CANCELLING...";
+                btnConnect.Enabled = false;
+                if (ctsConnect != null)
+                {
+                    try { ctsConnect.Cancel(); } catch { }
+                }
+                return;
+            }
+
+            // 2. If already busy with disconnect, ignore
+            if (isBusy) return;
+
+            // 3. If connected, perform Disconnect
+            if (isConnected)
+            {
+                isBusy = true;
+                btnConnect.Enabled = false;
+                progressBar.Visible = true;
+                progressBar.Style = ProgressBarStyle.Marquee;
+
+                try
                 {
                     Log("Disconnecting from LAN...", Color.FromArgb(245, 158, 11));
                     await Task.Run(() =>
@@ -408,7 +427,7 @@ namespace OpenMesh.Gaming.Client
                         string myId = GetLocalNodeId();
                         try
                         {
-                            using (TimeoutWebClient wc = new TimeoutWebClient(1500))
+                            using (TimeoutWebClient wc = new TimeoutWebClient(2000))
                             {
                                 wc.DownloadString("http://" + serverAddress + ":" + serverWebPort + "/api/client_disconnect?id=" + myId);
                             }
@@ -436,27 +455,74 @@ namespace OpenMesh.Gaming.Client
                     lblHostPing.Text = "Latency: --";
                     Log("Disconnected successfully.", Color.FromArgb(16, 185, 129));
                 }
-                else
+                catch (Exception ex)
                 {
-                    Log("Starting connection process...", Color.FromArgb(0, 229, 255));
-                    await Task.Run(() => PerformFullConnect());
-
-                    isConnected = true;
-                    btnConnect.Text = "DISCONNECT FROM LAN";
-                    btnConnect.BackColor = Color.FromArgb(239, 68, 68);
-                    lblClientStatus.Text = "Status: Connected";
-                    lblClientStatus.ForeColor = Color.FromArgb(16, 185, 129);
+                    Log("Disconnect error: " + ex.Message, Color.FromArgb(239, 68, 68));
                 }
+                finally
+                {
+                    isBusy = false;
+                    btnConnect.Enabled = true;
+                    progressBar.Visible = false;
+                }
+                await RunPeriodicPingAsync();
+                return;
+            }
+
+            // 4. Otherwise, start Connecting with instant cancel capability
+            isBusy = true;
+            isConnecting = true;
+            btnConnect.Text = "❌ CANCEL CONNECTION";
+            btnConnect.BackColor = Color.FromArgb(220, 38, 38);
+            btnConnect.Enabled = true; // Stay clickable so user can cancel!
+            progressBar.Visible = true;
+            progressBar.Style = ProgressBarStyle.Marquee;
+
+            ctsConnect = new System.Threading.CancellationTokenSource();
+            var cancelToken = ctsConnect.Token;
+
+            try
+            {
+                Log("Starting connection process...", Color.FromArgb(0, 229, 255));
+                await Task.Run(() => PerformFullConnect(cancelToken), cancelToken);
+
+                isConnected = true;
+                btnConnect.Text = "DISCONNECT FROM LAN";
+                btnConnect.BackColor = Color.FromArgb(239, 68, 68);
+                lblClientStatus.Text = "Status: Connected";
+                lblClientStatus.ForeColor = Color.FromArgb(16, 185, 129);
+            }
+            catch (OperationCanceledException)
+            {
+                Log("Connection cancelled by user. Resetting interface.", Color.FromArgb(245, 158, 11));
+                isConnected = false;
+                btnConnect.Text = "CONNECT TO GAMING LAN";
+                btnConnect.BackColor = Color.FromArgb(16, 185, 129);
+                lblClientStatus.Text = "Status: Disconnected";
+                lblClientStatus.ForeColor = Color.FromArgb(239, 68, 68);
+                lblClientIp.Text = "--.--.--.--";
             }
             catch (Exception ex)
             {
                 Log("Error: " + ex.Message, Color.FromArgb(239, 68, 68));
+                isConnected = false;
+                btnConnect.Text = "CONNECT TO GAMING LAN";
+                btnConnect.BackColor = Color.FromArgb(16, 185, 129);
+                lblClientStatus.Text = "Status: Disconnected";
+                lblClientStatus.ForeColor = Color.FromArgb(239, 68, 68);
+                lblClientIp.Text = "--.--.--.--";
             }
             finally
             {
                 isBusy = false;
+                isConnecting = false;
                 btnConnect.Enabled = true;
                 progressBar.Visible = false;
+                if (ctsConnect != null)
+                {
+                    try { ctsConnect.Dispose(); } catch { }
+                    ctsConnect = null;
+                }
             }
             await RunPeriodicPingAsync();
         }
@@ -558,9 +624,10 @@ namespace OpenMesh.Gaming.Client
             }
         }
 
-        private void PerformFullConnect()
+        private void PerformFullConnect(System.Threading.CancellationToken ct)
         {
             string cli = GetZtCliPath();
+            ct.ThrowIfCancellationRequested();
 
             // 1. Install ZeroTier if missing
             if (cli == null)
@@ -578,6 +645,7 @@ namespace OpenMesh.Gaming.Client
                     }
                 }
 
+                ct.ThrowIfCancellationRequested();
                 Log("Installing ZeroTier silently (please wait ~15s)...", Color.FromArgb(245, 158, 11));
                 Process msiProc = Process.Start(new ProcessStartInfo
                 {
@@ -593,6 +661,8 @@ namespace OpenMesh.Gaming.Client
                 Log("ZeroTier installed successfully!", Color.FromArgb(16, 185, 129));
             }
 
+            ct.ThrowIfCancellationRequested();
+
             // 2. Resolve Server & Fetch Dynamic Network Info
             string targetHost = serverAddress;
             bool serverReachable = false;
@@ -607,6 +677,7 @@ namespace OpenMesh.Gaming.Client
 
             if (!serverReachable)
             {
+                ct.ThrowIfCancellationRequested();
                 if (autoDiscoverLan)
                 {
                     targetHost = AutoDiscoverServerLanIp();
@@ -617,6 +688,7 @@ namespace OpenMesh.Gaming.Client
                 }
             }
 
+            ct.ThrowIfCancellationRequested();
             string myNodeId = GetLocalNodeId();
 
             // Handshake with server API to retrieve network ID and dynamic settings
@@ -646,6 +718,8 @@ namespace OpenMesh.Gaming.Client
                 Log("API Handshake notice: " + detail, Color.FromArgb(245, 158, 11));
             }
 
+            ct.ThrowIfCancellationRequested();
+
             if (string.IsNullOrEmpty(networkId))
             {
                 throw new Exception("Could not retrieve Network ID from server. Check server address/port or firewall.");
@@ -660,6 +734,8 @@ namespace OpenMesh.Gaming.Client
                 }
             }
             catch { }
+
+            ct.ThrowIfCancellationRequested();
 
             // 3. Download & Sync Moon Root
             string moonsDir = @"C:\ProgramData\ZeroTier\One\moons.d";
@@ -681,6 +757,8 @@ namespace OpenMesh.Gaming.Client
                 Log("Moon download notice: " + ex.Message, Color.FromArgb(245, 158, 11));
             }
 
+            ct.ThrowIfCancellationRequested();
+
             // 4. Restart ZeroTier Service to load new moon root
             if (downloadedMoon)
             {
@@ -688,6 +766,8 @@ namespace OpenMesh.Gaming.Client
                 RestartService();
                 System.Threading.Thread.Sleep(3000);
             }
+
+            ct.ThrowIfCancellationRequested();
 
             // 5. Join Network
             Log("Joining OpenMesh Network (" + networkId + ")...", Color.FromArgb(0, 229, 255));
@@ -698,6 +778,11 @@ namespace OpenMesh.Gaming.Client
             string assignedIp = "Assigning...";
             for (int i = 0; i < 15; i++)
             {
+                if (ct.IsCancellationRequested)
+                {
+                    if (cli != null && !string.IsNullOrEmpty(networkId)) RunCommand(cli, "leave " + networkId);
+                    ct.ThrowIfCancellationRequested();
+                }
                 System.Threading.Thread.Sleep(1000);
                 string outNet = RunCommand(cli, "listnetworks");
                 if (outNet.Contains("ACCESS_DENIED"))
