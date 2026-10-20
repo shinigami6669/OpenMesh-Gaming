@@ -85,53 +85,71 @@ Traditional solutions (Hamachi, Radmin VPN, or ZeroTier Cloud) rely heavily on c
 
 ---
 
-## 🚀 Quick Start Guide
+## 🚀 Server Setup Scenarios
 
-### 1. Server Installation (Linux / Raspberry Pi)
+Choose the setup scenario that matches your deployment environment:
 
-Run the automated installer on your server:
+---
 
-```bash
-git clone https://github.com/your-username/OpenMesh-Gaming.git
-cd OpenMesh-Gaming/server
-sudo chmod +x install.sh uninstall.sh
-sudo ./install.sh
-```
+### 🏠 Scenario A: Personal Device at Home (Raspberry Pi, Mini-PC, or Home Linux PC)
 
-During installation, you will be prompted for:
-1. **Admin Username & Password:** Used to log into the web dashboard.
-2. **Dashboard Web Port:** Default is `8080`.
-3. **Public WAN IP or Domain (Optional):** Enter your public static IP or DDNS if players will connect from other houses over the Internet.
+Use this scenario if you are hosting the server on a hardware device connected to your home router/Wi-Fi:
 
-Once installed, the dashboard will be live at:
-```
-http://<your-server-ip>:8080
-```
+* **Benefits:** Players on the same home Wi-Fi or Ethernet get wire-speed LAN routing with latency **< 1 ms**, and you retain 100% physical ownership of your hardware.
+* **Requirements for Remote Internet Friends:**
+  1. **Static Public IP or DDNS:** Obtain a static public IP from your ISP or use a free DDNS service (e.g., DuckDNS).
+  2. **Router Port Forwarding:** Forward these two ports in your home router to your server's local LAN IP (e.g. `192.168.1.100`):
+     - **`9993`** (**UDP**) ➔ ZeroTier Mesh & Moon Root Traffic
+     - **`8080`** (**TCP**) ➔ Web Dashboard & Client Handshake  
+     *(See [docs/PORT_FORWARDING.md](docs/PORT_FORWARDING.md) for step-by-step router instructions).*
+* **Installation:**
+  ```bash
+  git clone https://github.com/shinigami6669/OpenMesh-Gaming.git
+  cd OpenMesh-Gaming/server
+  sudo chmod +x *.sh
+  sudo ./install.sh
+  ```
+  *(During installation, enter your modem's Public Static IP in the Public IP prompt).*
 
-To manage the server service:
+---
+
+### ☁️ Scenario B: Cloud VPS / Dedicated Server (Hetzner, DigitalOcean, AWS, etc.)
+
+Use this scenario if you are hosting on an internet-facing cloud virtual machine:
+
+* **Benefits:** **Zero router configuration and zero port forwarding!** The server already has a direct public IP, 24/7 uptime, and high-speed data center bandwidth accessible by all friends from anywhere.
+* **Requirements:**
+  1. Simply open ports in the Linux firewall (UFW) or Cloud Security Group:
+     ```bash
+     sudo ufw allow 22/tcp
+     sudo ufw allow 8080/tcp
+     sudo ufw allow 9993/udp
+     sudo ufw enable
+     ```
+* **Installation:**
+  ```bash
+  git clone https://github.com/shinigami6669/OpenMesh-Gaming.git
+  cd OpenMesh-Gaming/server
+  sudo chmod +x *.sh
+  sudo ./install.sh
+  ```
+  *(During installation, enter your VPS public IP in the Public IP prompt).*
+
+---
+
+### ⚙️ Server Management & 1-Click Updates
+
+Check service status or restart:
 ```bash
 sudo systemctl status openmesh-server
 sudo systemctl restart openmesh-server
 ```
 
-To update OpenMesh Server to the latest version at any time:
+To update OpenMesh Server to the latest version in 1 second:
 ```bash
 cd OpenMesh-Gaming/server
 sudo ./update.sh
 ```
-
----
-
-### 2. Router Port Forwarding (For WAN / Internet Play)
-
-If friends are connecting to your server from their homes over the Internet, forward the following ports in your router settings to your server's local LAN IP:
-
-| Port | Protocol | Purpose |
-| :--- | :--- | :--- |
-| **`9993`** | **UDP** | ZeroTier Mesh Traffic & Moon Root |
-| **`8080`** | **TCP** | Web Dashboard & Client Handshake API |
-
-*For step-by-step router configuration instructions, see [docs/PORT_FORWARDING.md](docs/PORT_FORWARDING.md).*
 
 ---
 
