@@ -6,6 +6,10 @@
 </p>
 
 <p align="center">
+  <a href="README.md"><b>English</b></a> • <a href="README.fa.md"><b>فارسی</b></a>
+</p>
+
+<p align="center">
   <img src="https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square" alt="License: MIT">
   <img src="https://img.shields.io/badge/Platform-Linux%20%7C%20Raspberry%20Pi-E95420.svg?style=flat-square&logo=linux" alt="Platform: Linux">
   <img src="https://img.shields.io/badge/Client-Windows%20Forms%20(C%23)-0078D4.svg?style=flat-square&logo=windows" alt="Client: Windows">
