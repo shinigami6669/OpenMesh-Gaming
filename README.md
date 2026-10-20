@@ -54,7 +54,10 @@ Traditional solutions (Hamachi, Radmin VPN, or ZeroTier Cloud) rely heavily on c
   - Moon auto-regeneration modal with dual LAN/WAN endpoint coexistence.
   - Built-in router port forwarding helper.
 - **🖥️ 1-Click C# Windows Client:**
-  - Cyber-dark UI with real-time ping monitors for Server Core, Host/Peer, and assigned Virtual IP.
+  - Multi-theme support (**Cyber Dark**, **Cyberpunk Purple**, and **Clean Light**).
+  - **Bilingual Interface** with instant runtime switching between **English** and **Persian (فارسی)**.
+  - **Instant Cancel/Disconnect** button allowing players to abort connection handshakes at any second without freezing.
+  - Real-time ping monitors for Server Core, Host/Peer, and assigned Virtual IP.
   - Auto-discovers server across local subnets or connects via configured public IP/domain.
   - Automatically downloads and syncs the server's signed Moon root without manual configuration.
   - Builds in seconds using the native C# compiler pre-installed on Windows (`csc.exe`).
