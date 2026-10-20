@@ -624,7 +624,7 @@ namespace OpenMesh.Gaming.Client
             try
             {
                 string checkUrl = string.Format("http://{0}:{1}/api/client_check{2}", targetHost, serverWebPort, string.IsNullOrEmpty(myNodeId) ? "" : "?id=" + myNodeId);
-                using (TimeoutWebClient wc = new TimeoutWebClient(3000))
+                using (TimeoutWebClient wc = new TimeoutWebClient(8000))
                 {
                     string json = wc.DownloadString(checkUrl);
                     var mNet = Regex.Match(json, @"""networkId"":\s*""([0-9a-fA-F]{16})""");
@@ -642,7 +642,8 @@ namespace OpenMesh.Gaming.Client
             }
             catch (Exception ex)
             {
-                Log("API Handshake notice: " + ex.Message, Color.FromArgb(245, 158, 11));
+                string detail = ex.InnerException != null ? ex.InnerException.Message : ex.Message;
+                Log("API Handshake notice: " + detail, Color.FromArgb(245, 158, 11));
             }
 
             if (string.IsNullOrEmpty(networkId))
@@ -653,7 +654,7 @@ namespace OpenMesh.Gaming.Client
             // Notify server of connection attempt
             try
             {
-                using (TimeoutWebClient wc = new TimeoutWebClient(1500))
+                using (TimeoutWebClient wc = new TimeoutWebClient(5000))
                 {
                     wc.DownloadString(string.Format("http://{0}:{1}/api/client_connect?id={2}", targetHost, serverWebPort, myNodeId));
                 }
@@ -668,7 +669,7 @@ namespace OpenMesh.Gaming.Client
             bool downloadedMoon = false;
             try
             {
-                using (WebClient wc = new WebClient())
+                using (TimeoutWebClient wc = new TimeoutWebClient(8000))
                 {
                     wc.DownloadFile(string.Format("http://{0}:{1}/download/moon", targetHost, serverWebPort), moonFile);
                     downloadedMoon = true;
@@ -1415,12 +1416,18 @@ namespace OpenMesh.Gaming.Client
         public TimeoutWebClient(int timeoutMs)
         {
             this.timeout = timeoutMs;
+            this.Proxy = null; // Bypass system/VPN proxy for direct connection
         }
 
         protected override WebRequest GetWebRequest(Uri address)
         {
             WebRequest w = base.GetWebRequest(address);
             w.Timeout = timeout;
+            w.Proxy = null;
+            if (w is HttpWebRequest)
+            {
+                ((HttpWebRequest)w).ReadWriteTimeout = timeout;
+            }
             return w;
         }
     }
