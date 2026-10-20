@@ -19,6 +19,10 @@
   <img src="https://img.shields.io/badge/Language-Python%203%20%26%20C%23-2b5b84.svg?style=flat-square" alt="Languages">
 </p>
 
+<p align="center">
+  <img src="docs/assets/social-preview.png" alt="بنر اوپن‌مش گیمینگ" width="100%">
+</p>
+
 ---
 
 ## 📖 معرفی پروژه
@@ -131,6 +135,10 @@ sudo ./update.sh
 ---
 
 ### ۳. راه‌اندازی کلاینت ویندوز
+
+<p align="center">
+  <img src="docs/assets/demo.gif" alt="دموی کارکرد کلاینت ویندوز اوپن‌مش" width="90%">
+</p>
 
 #### روش اول: ساخت با ۱ کلیک
 بدون نیاز به ویژوال استودیو، در پوشه `client`:

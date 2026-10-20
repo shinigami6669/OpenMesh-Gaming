@@ -17,6 +17,10 @@
   <img src="https://img.shields.io/badge/Language-Python%203%20%26%20C%23-2b5b84.svg?style=flat-square" alt="Languages">
 </p>
 
+<p align="center">
+  <img src="docs/assets/social-preview.png" alt="OpenMesh Gaming Banner" width="100%">
+</p>
+
 ---
 
 ## 📖 Overview / معرفی پروژه
@@ -132,6 +136,10 @@ If friends are connecting to your server from their homes over the Internet, for
 ---
 
 ### 3. Windows Client Setup
+
+<p align="center">
+  <img src="docs/assets/demo.gif" alt="OpenMesh Gaming Windows Client Live Demo" width="90%">
+</p>
 
 #### Option A: Build with 1-Click
 No Visual Studio or external SDK required! Simply run the build script in `client/`:
