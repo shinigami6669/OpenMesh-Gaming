@@ -44,8 +44,9 @@ namespace OpenMesh.Gaming.Client
         private int serverWebPort = 8080;
         private bool autoDiscoverLan = true;
         private string networkId = "";
-        private string serverVirtualIp = "10.147.20.1";
-        private string peerVirtualIp = "10.147.20.2";
+        private string bootstrapToken = "";
+        private string serverVirtualIp = "";
+        private string peerVirtualIp = "";
         private string currentLanguage = "en"; // "en" or "fa"
         private string currentTheme = "cyber_dark"; // "cyber_dark", "cyber_purple", "clean_light"
 
@@ -114,11 +115,30 @@ namespace OpenMesh.Gaming.Client
             ApplyTheme();
             ApplyLocalization();
 
-            var _ = CheckCurrentStatusAsync();
+            // The window handle does not exist yet during construction, so the
+            // status probe has to wait for it before touching any control.
+            this.Shown += (s, e) =>
+            {
+                try { CheckCurrentStatusAsync(); }
+                catch { }
+            };
 
             pingTimer = new Timer();
             pingTimer.Interval = 3000;
-            pingTimer.Tick += async (s, e) => await RunPeriodicPingAsync();
+            // async void handler: wrap the body so an exception can never
+            // escape onto the WinForms message loop (it would resurface as
+            // Application.ThreadException on every single tick).
+            pingTimer.Tick += async (s, e) =>
+            {
+                try
+                {
+                    await RunPeriodicPingAsync();
+                }
+                catch (Exception ex)
+                {
+                    try { Log("Ping loop error: " + ex.Message, Color.FromArgb(245, 158, 11)); } catch { }
+                }
+            };
             pingTimer.Start();
         }
 
@@ -266,7 +286,7 @@ namespace OpenMesh.Gaming.Client
                 }
             };
             lblSrvTitle = new Label { Text = "SERVER CORE", Font = new Font("Segoe UI", 8.5f, FontStyle.Bold), Location = new Point(14, 12), AutoSize = true };
-            lblServerSub = new Label { Text = "IP: " + serverVirtualIp, Font = new Font("Consolas", 8.5f), Location = new Point(14, 32), AutoSize = true };
+            lblServerSub = new Label { Text = "IP: " + FormatIp(serverVirtualIp), Font = new Font("Consolas", 8.5f), Location = new Point(14, 32), AutoSize = true };
             lblServerStatus = new Label { Text = "● Disconnected", ForeColor = Color.FromArgb(130, 140, 160), Font = new Font("Segoe UI", 11f, FontStyle.Bold), Location = new Point(14, 52), AutoSize = true };
             lblServerPing = new Label { Text = "Latency: --", Font = new Font("Segoe UI", 8.5f), Location = new Point(14, 76), AutoSize = true };
             cardServer.Controls.AddRange(new Control[] { lblSrvTitle, lblServerSub, lblServerStatus, lblServerPing });
@@ -288,7 +308,7 @@ namespace OpenMesh.Gaming.Client
                 }
             };
             lblHstTitle = new Label { Text = "HOST / PEER", Font = new Font("Segoe UI", 8.5f, FontStyle.Bold), Location = new Point(14, 12), AutoSize = true };
-            lblHostSub = new Label { Text = "IP: " + peerVirtualIp, Font = new Font("Consolas", 8.5f), Location = new Point(14, 32), AutoSize = true };
+            lblHostSub = new Label { Text = "IP: " + FormatIp(peerVirtualIp), Font = new Font("Consolas", 8.5f), Location = new Point(14, 32), AutoSize = true };
             lblHostStatus = new Label { Text = "● Disconnected", ForeColor = Color.FromArgb(130, 140, 160), Font = new Font("Segoe UI", 11f, FontStyle.Bold), Location = new Point(14, 52), AutoSize = true };
             lblHostPing = new Label { Text = "Latency: --", Font = new Font("Segoe UI", 8.5f), Location = new Point(14, 76), AutoSize = true };
             cardHost.Controls.AddRange(new Control[] { lblHstTitle, lblHostSub, lblHostStatus, lblHostPing });
@@ -566,11 +586,16 @@ namespace OpenMesh.Gaming.Client
             }
         }
 
+        private static string FormatIp(string ip)
+        {
+            return string.IsNullOrEmpty(ip) ? "--" : ip;
+        }
+
         private void UpdateStatusCardsText()
         {
             bool isFa = (currentLanguage == "fa");
-            lblServerSub.Text = "IP: " + serverVirtualIp;
-            lblHostSub.Text = "IP: " + peerVirtualIp;
+            lblServerSub.Text = "IP: " + FormatIp(serverVirtualIp);
+            lblHostSub.Text = "IP: " + FormatIp(peerVirtualIp);
 
             // Server Card
             if (serverStatusState == "online")
@@ -673,12 +698,35 @@ namespace OpenMesh.Gaming.Client
             }
         }
 
+        /// <summary>
+        /// Marshals an action onto the UI thread without ever throwing.
+        /// Invoke blocks the calling thread and throws when the handle is
+        /// gone, so we use BeginInvoke and swallow anything that escapes.
+        /// </summary>
+        private void PostToUi(Action action)
+        {
+            if (action == null) return;
+            if (this.IsDisposed || !this.IsHandleCreated) return;
+            try
+            {
+                if (this.InvokeRequired)
+                {
+                    this.BeginInvoke(action);
+                }
+                else
+                {
+                    action();
+                }
+            }
+            catch { }
+        }
+
         private void Log(string message, Color? color = null)
         {
             if (this.IsDisposed || !this.IsHandleCreated) return;
             if (this.InvokeRequired)
             {
-                this.Invoke(new Action(() => Log(message, color)));
+                PostToUi(() => Log(message, color));
                 return;
             }
 
@@ -719,18 +767,18 @@ namespace OpenMesh.Gaming.Client
                         }
 
                         var match = Regex.Match(output, @"(\d+\.\d+\.\d+\.\d+)/\d+");
-                        this.Invoke(new Action(() =>
+                        PostToUi(() =>
                         {
                             isConnected = true;
                             clientStatusState = "connected";
                             UpdateConnectButtonText();
-                            lblClientIp.Text = match.Success ? match.Groups[1].Value : "10.147.20.xxx";
+                            lblClientIp.Text = match.Success ? match.Groups[1].Value : "--";
                             UpdateStatusCardsText();
                             string msg = (currentLanguage == "fa")
                                 ? "به شبکه متصل هستید: " + networkId
                                 : "Already joined network " + networkId;
                             Log(msg, activeTheme.AccentClient);
-                        }));
+                        });
                     }
                 }
             });
@@ -763,7 +811,8 @@ namespace OpenMesh.Gaming.Client
                 string cancelLog = isFa ? "در حال لغو فرآیند اتصال..." : "Cancelling connection attempt...";
                 Log(cancelLog, Color.FromArgb(245, 158, 11));
                 btnConnect.Text = isFa ? "در حال لغو..." : "CANCELLING...";
-                btnConnect.Enabled = false;
+                // The button stays enabled so the user is never stuck with a
+                // dead control; the in-flight task restores the normal state.
                 if (ctsConnect != null)
                 {
                     try { ctsConnect.Cancel(); } catch { }
@@ -790,7 +839,7 @@ namespace OpenMesh.Gaming.Client
                         string myId = GetLocalNodeId();
                         try
                         {
-                            using (TimeoutWebClient wc = new TimeoutWebClient(2000))
+                            using (TimeoutWebClient wc = new TimeoutWebClient(2000, bootstrapToken))
                             {
                                 wc.DownloadString("http://" + serverAddress + ":" + serverWebPort + "/api/client_disconnect?id=" + myId);
                             }
@@ -841,7 +890,11 @@ namespace OpenMesh.Gaming.Client
             try
             {
                 Log(isFa ? "شروع فرآیند اتصال به شبکه..." : "Starting connection process...", activeTheme.HeaderAccent);
-                await Task.Run(() => PerformFullConnect(cancelToken), cancelToken);
+                // Do NOT pass the token to Task.Run: that makes the task
+                // complete as "Canceled" while the delegate is still running,
+                // which would dispose the token underneath it. The delegate
+                // observes cancellation itself.
+                await Task.Run(() => PerformFullConnect(cancelToken));
 
                 isConnected = true;
                 clientStatusState = "connected";
@@ -939,11 +992,15 @@ namespace OpenMesh.Gaming.Client
 
         private bool TestTcpPort(string host, int port, int timeoutMs)
         {
+            TcpClient client = null;
             try
             {
-                using (TcpClient client = new TcpClient())
+                client = new TcpClient();
+                var result = client.BeginConnect(host, port, null, null);
+                // The wait handle must be disposed or every probe leaks a
+                // kernel handle (254 probes per LAN scan).
+                using (result.AsyncWaitHandle)
                 {
-                    var result = client.BeginConnect(host, port, null, null);
                     bool success = result.AsyncWaitHandle.WaitOne(timeoutMs);
                     if (success && client.Connected)
                     {
@@ -953,11 +1010,41 @@ namespace OpenMesh.Gaming.Client
                 }
             }
             catch { }
+            finally
+            {
+                if (client != null)
+                {
+                    try { client.Close(); } catch { }
+                }
+            }
             return false;
         }
 
         private string GetPrimaryLocalIp()
         {
+            // Prefer an operational interface address: it works on air-gapped
+            // hosts where the 8.8.8.8 trick fails.
+            try
+            {
+                foreach (NetworkInterface ni in NetworkInterface.GetAllNetworkInterfaces())
+                {
+                    if (ni.OperationalStatus != OperationalStatus.Up) continue;
+                    if (ni.NetworkInterfaceType == NetworkInterfaceType.Loopback) continue;
+                    if (ni.NetworkInterfaceType == NetworkInterfaceType.Tunnel) continue;
+                    foreach (UnicastIPAddressInformation ua in ni.GetIPProperties().UnicastAddresses)
+                    {
+                        if (ua.Address.AddressFamily == AddressFamily.InterNetwork)
+                        {
+                            string ip = ua.Address.ToString();
+                            if (!ip.StartsWith("127.") && !ip.StartsWith("169.254."))
+                                return ip;
+                        }
+                    }
+                }
+            }
+            catch { }
+
+            // Fall back to the default-route trick.
             try
             {
                 using (Socket socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, 0))
@@ -1053,7 +1140,8 @@ namespace OpenMesh.Gaming.Client
                     {
                         networkId = mNet.Groups[1].Value.ToLower();
                     }
-                    var mSrvIp = Regex.Match(json, @"""serverIp"":\s*""([^""]+)""");
+                    // The server emits "serverVirtualIp", not "serverIp".
+                    var mSrvIp = Regex.Match(json, @"""serverVirtualIp"":\s*""([^""]+)""");
                     if (mSrvIp.Success && !string.IsNullOrEmpty(mSrvIp.Groups[1].Value))
                     {
                         serverVirtualIp = mSrvIp.Groups[1].Value;
@@ -1076,7 +1164,7 @@ namespace OpenMesh.Gaming.Client
 
             try
             {
-                using (TimeoutWebClient wc = new TimeoutWebClient(5000))
+                using (TimeoutWebClient wc = new TimeoutWebClient(5000, bootstrapToken))
                 {
                     wc.DownloadString(string.Format("http://{0}:{1}/api/client_connect?id={2}", targetHost, serverWebPort, myNodeId));
                 }
@@ -1090,19 +1178,37 @@ namespace OpenMesh.Gaming.Client
             if (!Directory.Exists(moonsDir)) Directory.CreateDirectory(moonsDir);
 
             string moonFile = Path.Combine(moonsDir, "openmesh_root.moon");
+            string moonTmp = moonFile + ".download";
             bool downloadedMoon = false;
             try
             {
-                using (TimeoutWebClient wc = new TimeoutWebClient(8000))
+                // Download to a temp file first: WebClient.DownloadFile
+                // truncates (and on failure deletes) the destination, which
+                // would destroy a working moon root.
+                using (TimeoutWebClient wc = new TimeoutWebClient(8000, bootstrapToken))
                 {
-                    wc.DownloadFile(string.Format("http://{0}:{1}/download/moon", targetHost, serverWebPort), moonFile);
+                    wc.DownloadFile(string.Format("http://{0}:{1}/download/moon", targetHost, serverWebPort), moonTmp);
+                }
+                // Only replace the live moon once the new one is on disk.
+                if (File.Exists(moonTmp) && new FileInfo(moonTmp).Length > 0)
+                {
+                    if (File.Exists(moonFile)) File.Delete(moonFile);
+                    File.Move(moonTmp, moonFile);
                     downloadedMoon = true;
                     Log(isFa ? "فایل Moon سرور با موفقیت همگام‌سازی و دانلود شد." : "Downloaded latest synced Moon root from server.", activeTheme.AccentClient);
+                }
+                else
+                {
+                    Log(isFa ? "فایل Moon دانلود شد اما خالی بود؛ فایل قبلی حفظ شد." : "Downloaded Moon was empty; keeping the previous moon.", Color.FromArgb(245, 158, 11));
                 }
             }
             catch (Exception ex)
             {
                 Log((isFa ? "اطلاعیه دانلود Moon: " : "Moon download notice: ") + ex.Message, Color.FromArgb(245, 158, 11));
+            }
+            finally
+            {
+                try { if (File.Exists(moonTmp)) File.Delete(moonTmp); } catch { }
             }
 
             ct.ThrowIfCancellationRequested();
@@ -1156,19 +1262,19 @@ namespace OpenMesh.Gaming.Client
 
             try
             {
-                using (TimeoutWebClient wc = new TimeoutWebClient(1500))
+                using (TimeoutWebClient wc = new TimeoutWebClient(1500, bootstrapToken))
                 {
                     wc.DownloadString(string.Format("http://{0}:{1}/api/client_connect?id={2}", targetHost, serverWebPort, GetLocalNodeId()));
                 }
             }
             catch { }
 
-            this.Invoke(new Action(() =>
+            PostToUi(() =>
             {
                 lblClientIp.Text = assignedIp;
                 UpdateStatusCardsText();
                 Log((isFa ? "آی‌پی مجازی گیمینگ شما: " : "Assigned Virtual IP: ") + assignedIp, activeTheme.AccentClient);
-            }));
+            });
         }
 
         private async Task ImportNewMoonAsync()
@@ -1225,8 +1331,33 @@ namespace OpenMesh.Gaming.Client
             }
         }
 
+        private static string EscapeJsonValue(string value)
+        {
+            if (string.IsNullOrEmpty(value)) return "";
+            return value
+                .Replace("\\", "\\\\")
+                .Replace("\"", "\\\"")
+                .Replace("\r", "\\r")
+                .Replace("\n", "\\n")
+                .Replace("\t", "\\t");
+        }
+
         private string GetConfigFilePath()
         {
+            // Prefer %AppData% so the config stays writable when the exe lives
+            // in a read-only location such as Program Files.
+            try
+            {
+                string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+                if (!string.IsNullOrEmpty(appData))
+                {
+                    string dir = Path.Combine(appData, "OpenMeshGaming");
+                    if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
+                    return Path.Combine(dir, "openmesh_client_config.json");
+                }
+            }
+            catch { }
+
             try
             {
                 string dir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
@@ -1287,6 +1418,11 @@ namespace OpenMesh.Gaming.Client
                         string l = mLang.Groups[1].Value.Trim().ToLower();
                         if (l == "fa" || l == "en") currentLanguage = l;
                     }
+                    var mBoot = Regex.Match(json, @"""bootstrapToken"":\s*""([^""]+)""");
+                    if (mBoot.Success)
+                    {
+                        bootstrapToken = mBoot.Groups[1].Value.Trim();
+                    }
                     var mTheme = Regex.Match(json, @"""theme"":\s*""([^""]+)""");
                     if (mTheme.Success)
                     {
@@ -1304,17 +1440,23 @@ namespace OpenMesh.Gaming.Client
             {
                 string path = GetConfigFilePath();
                 string json = string.Format(
-                    "{{\n  \"serverAddress\": \"{0}\",\n  \"serverPort\": {1},\n  \"autoDiscover\": {2},\n  \"networkId\": \"{3}\",\n  \"serverVirtualIp\": \"{4}\",\n  \"peerVirtualIp\": \"{5}\",\n  \"language\": \"{6}\",\n  \"theme\": \"{7}\"\n}}",
-                    serverAddress,
+                    "{{\n  \"serverAddress\": \"{0}\",\n  \"serverPort\": {1},\n  \"autoDiscover\": {2},\n  \"networkId\": \"{3}\",\n  \"serverVirtualIp\": \"{4}\",\n  \"peerVirtualIp\": \"{5}\",\n  \"language\": \"{6}\",\n  \"theme\": \"{7}\",\n  \"bootstrapToken\": \"{8}\"\n}}",
+                    EscapeJsonValue(serverAddress),
                     serverWebPort,
                     autoDiscoverLan ? "true" : "false",
-                    networkId,
-                    serverVirtualIp,
-                    peerVirtualIp,
-                    currentLanguage,
-                    currentTheme
+                    EscapeJsonValue(networkId),
+                    EscapeJsonValue(serverVirtualIp),
+                    EscapeJsonValue(peerVirtualIp),
+                    EscapeJsonValue(currentLanguage),
+                    EscapeJsonValue(currentTheme),
+                    EscapeJsonValue(bootstrapToken)
                 );
-                File.WriteAllText(path, json);
+                // Atomic write: concurrent saves from the ping timer and the
+                // discovery thread must not truncate the file.
+                string tmp = path + ".tmp";
+                File.WriteAllText(tmp, json);
+                if (File.Exists(path)) File.Delete(path);
+                File.Move(tmp, path);
             }
             catch { }
         }
@@ -1325,7 +1467,7 @@ namespace OpenMesh.Gaming.Client
             using (Form dlg = new Form())
             {
                 dlg.Text = isFa ? "تنظیمات کلاینت اوپن‌مش" : "OpenMesh Gaming - Settings";
-                dlg.Size = new Size(500, 520);
+                dlg.Size = new Size(500, 560);
                 dlg.StartPosition = FormStartPosition.CenterParent;
                 dlg.FormBorderStyle = FormBorderStyle.FixedDialog;
                 dlg.MaximizeBox = false;
@@ -1461,13 +1603,33 @@ namespace OpenMesh.Gaming.Client
                     BorderStyle = BorderStyle.FixedSingle
                 };
 
-                // 6. Auto-discover
+                // 6. Bootstrap Token
+                Label lblBoot = new Label
+                {
+                    Text = isFa ? "توکن Bootstrap (از سرور مرکزی):" : "Bootstrap Token (shown by the server on install):",
+                    ForeColor = activeTheme.TextMuted,
+                    Location = new Point(22, 356),
+                    AutoSize = true,
+                    Font = new Font("Segoe UI", 9f, FontStyle.Bold)
+                };
+                TextBox txtBoot = new TextBox
+                {
+                    Text = bootstrapToken,
+                    Location = new Point(24, 378),
+                    Size = new Size(436, 25),
+                    BackColor = activeTheme.CardBack,
+                    ForeColor = activeTheme.TextPrimary,
+                    Font = new Font("Consolas", 9.5f),
+                    BorderStyle = BorderStyle.FixedSingle
+                };
+
+                // 7. Auto-discover
                 CheckBox chkAuto = new CheckBox
                 {
                     Text = isFa ? "اسکن خودکار شبکه محلی در صورت در دسترس نبودن آدرس سرور" : "Auto-scan LAN if server address is unreachable",
                     Checked = autoDiscoverLan,
                     ForeColor = activeTheme.TextMuted,
-                    Location = new Point(24, 356),
+                    Location = new Point(24, 414),
                     AutoSize = true,
                     Font = new Font("Segoe UI", 8.5f)
                 };
@@ -1477,7 +1639,7 @@ namespace OpenMesh.Gaming.Client
                 {
                     Text = isFa ? "ذخیره تنظیمات" : "Save Settings",
                     DialogResult = DialogResult.OK,
-                    Location = new Point(210, 415),
+                    Location = new Point(210, 452),
                     Size = new Size(135, 36),
                     BackColor = Color.FromArgb(16, 185, 129),
                     ForeColor = Color.White,
@@ -1491,7 +1653,7 @@ namespace OpenMesh.Gaming.Client
                 {
                     Text = isFa ? "انصراف" : "Cancel",
                     DialogResult = DialogResult.Cancel,
-                    Location = new Point(355, 415),
+                    Location = new Point(355, 452),
                     Size = new Size(105, 36),
                     BackColor = activeTheme.BtnDarkBack,
                     ForeColor = activeTheme.TextMuted,
@@ -1503,8 +1665,8 @@ namespace OpenMesh.Gaming.Client
 
                 dlg.Controls.AddRange(new Control[] {
                     lblTitle, lblLang, cmbLang, lblTheme, cmbTheme, pnlDivider,
-                    lblHost, txtHost, lblPort, txtPort, lblPeer, txtPeer, chkAuto,
-                    btnOk, btnCancel
+                    lblHost, txtHost, lblPort, txtPort, lblPeer, txtPeer,
+                    lblBoot, txtBoot, chkAuto, btnOk, btnCancel
                 });
                 dlg.AcceptButton = btnOk;
                 dlg.CancelButton = btnCancel;
@@ -1519,6 +1681,7 @@ namespace OpenMesh.Gaming.Client
                         serverAddress = host;
                         serverWebPort = val;
                         peerVirtualIp = txtPeer.Text.Trim();
+                        bootstrapToken = txtBoot.Text.Trim();
                         autoDiscoverLan = chkAuto.Checked;
 
                         // Language
@@ -1626,14 +1789,14 @@ namespace OpenMesh.Gaming.Client
                                 currentBanned.Add(id);
                                 if (!previousBannedMembers.Contains(id) && id != myId)
                                 {
-                                    this.Invoke(new Action(() => Log("📢 [ADMIN] Player (" + id + ") was BANNED by administrator.", Color.FromArgb(239, 68, 68))));
+                                    PostToUi(() => Log("📢 [ADMIN] Player (" + id + ") was BANNED by administrator.", Color.FromArgb(239, 68, 68)));
                                 }
                             }
                             foreach (string prevId in previousBannedMembers)
                             {
                                 if (!currentBanned.Contains(prevId) && prevId != myId)
                                 {
-                                    this.Invoke(new Action(() => Log("📢 [ADMIN] Player (" + prevId + ") was UNBANNED by administrator.", activeTheme.AccentClient)));
+                                    PostToUi(() => Log("📢 [ADMIN] Player (" + prevId + ") was UNBANNED by administrator.", activeTheme.AccentClient));
                                 }
                             }
                             previousBannedMembers = currentBanned;
@@ -1689,7 +1852,7 @@ namespace OpenMesh.Gaming.Client
         private void HandleKickedByAdmin()
         {
             if (this.IsDisposed || !this.IsHandleCreated) return;
-            this.Invoke(new Action(() =>
+            PostToUi(() =>
             {
                 bool isFa = (currentLanguage == "fa");
                 isConnected = false;
@@ -1718,13 +1881,13 @@ namespace OpenMesh.Gaming.Client
                     : "You were kicked from the gaming session by the network administrator.\n\nYour session was terminated, but you are NOT banned and may reconnect whenever you are ready.";
 
                 MessageBox.Show(this, msgKicked, isFa ? "⚠️ اخراج از سشن بازی" : "⚠️ Kicked from Session", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            }));
+            });
         }
 
         private void SetBannedState(bool banned, string reason)
         {
             if (this.IsDisposed || !this.IsHandleCreated) return;
-            this.Invoke(new Action(() =>
+            PostToUi(() =>
             {
                 bool isFa = (currentLanguage == "fa");
                 if (banned)
@@ -1781,7 +1944,7 @@ namespace OpenMesh.Gaming.Client
                         Log(unbanLog, activeTheme.AccentClient);
                     }
                 }
-            }));
+            });
         }
 
         private async Task RunPeriodicPingAsync()
@@ -1791,14 +1954,14 @@ namespace OpenMesh.Gaming.Client
                 if (this.IsDisposed || !this.IsHandleCreated) return;
                 try
                 {
-                    this.Invoke(new Action(() =>
+                    PostToUi(() =>
                     {
                         serverStatusState = "disconnected";
                         hostStatusState = "disconnected";
                         lastServerPing = null;
                         lastHostPing = null;
                         UpdateStatusCardsText();
-                    }));
+                    });
                 }
                 catch { }
                 return;
@@ -1815,17 +1978,26 @@ namespace OpenMesh.Gaming.Client
 
                 if (this.IsDisposed || !this.IsHandleCreated) return;
 
-                this.Invoke(new Action(() =>
+                PostToUi(() =>
                 {
                     lastServerPing = pingServer;
-                    serverStatusState = pingServer.HasValue ? "online" : "offline";
+                    if (string.IsNullOrEmpty(serverVirtualIp))
+                        serverStatusState = "disconnected";
+                    else
+                        serverStatusState = pingServer.HasValue ? "online" : "offline";
 
                     lastHostPing = pingPeer;
-                    hostStatusState = pingPeer.HasValue ? "online" : "offline";
+                    // No peer address configured means "unknown", not
+                    // "unreachable" - reporting it as offline would pin the
+                    // HOST card to a permanent false negative.
+                    if (string.IsNullOrEmpty(peerVirtualIp))
+                        hostStatusState = "disconnected";
+                    else
+                        hostStatusState = pingPeer.HasValue ? "online" : "offline";
 
                     clientStatusState = "connected";
                     UpdateStatusCardsText();
-                }));
+                });
             }
             catch { }
         }
@@ -1857,11 +2029,15 @@ namespace OpenMesh.Gaming.Client
 
         private async Task<long?> PingHostAsync(string ip)
         {
+            // No address configured means "unknown", not "unreachable". The
+            // caller distinguishes the two so the HOST card is not pinned to
+            // a permanent false "Offline".
             if (string.IsNullOrEmpty(ip)) return null;
             return await Task.Run(() =>
             {
                 try
                 {
+                    if (string.IsNullOrEmpty(ip)) return (long?)null;
                     using (Ping p = new Ping())
                     {
                         PingReply reply = p.Send(ip, 1200);
@@ -1894,12 +2070,12 @@ namespace OpenMesh.Gaming.Client
                             hostStatusState = "disconnected";
                             lastServerPing = null;
                             lastHostPing = null;
-                            this.Invoke(new Action(() =>
+                            PostToUi(() =>
                             {
                                 btnServiceToggle.Text = isFa ? "▶ شروع سرویس" : "▶ Start Service";
                                 UpdateConnectButtonText();
                                 UpdateStatusCardsText();
-                            }));
+                            });
                         }
                         else
                         {
@@ -1907,10 +2083,10 @@ namespace OpenMesh.Gaming.Client
                             sc.Start();
                             sc.WaitForStatus(ServiceControllerStatus.Running, TimeSpan.FromSeconds(10));
                             Log(isFa ? "سرویس ZeroTier فعال گردید." : "ZeroTier service started.", activeTheme.AccentClient);
-                            this.Invoke(new Action(() =>
+                            PostToUi(() =>
                             {
                                 btnServiceToggle.Text = isFa ? "⏹ توقف سرویس" : "⏹ Stop Service";
-                            }));
+                            });
                         }
                     }
                 }
@@ -1983,10 +2159,19 @@ namespace OpenMesh.Gaming.Client
     public class TimeoutWebClient : WebClient
     {
         private int timeout;
-        public TimeoutWebClient(int timeoutMs)
+        private string bootstrapToken;
+
+        public TimeoutWebClient(int timeoutMs) : this(timeoutMs, null) { }
+
+        public TimeoutWebClient(int timeoutMs, string bootstrapToken)
         {
             this.timeout = timeoutMs;
+            this.bootstrapToken = bootstrapToken;
             this.Proxy = null; // Bypass system/VPN proxy for direct connection
+            if (!string.IsNullOrEmpty(bootstrapToken))
+            {
+                this.Headers.Add("X-OpenMesh-Bootstrap", bootstrapToken);
+            }
         }
 
         protected override WebRequest GetWebRequest(Uri address)

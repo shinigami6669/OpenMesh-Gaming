@@ -18,6 +18,8 @@ import time
 import shutil
 import base64
 import re
+import hmac
+import ipaddress
 
 CONFIG_FILE = os.environ.get('OPENMESH_CONFIG', '/opt/openmesh/config.json')
 ZT_DIR = '/var/lib/zerotier-one'
@@ -25,15 +27,21 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 BANNED_FILE = os.path.join(APP_DIR, 'banned_members.json')
 IP_TRACK_FILE = os.path.join(APP_DIR, 'current_ip.txt')
 
+DEFAULT_ADMIN_USER = "admin"
+DEFAULT_ADMIN_PASS = "ChangeThisPassword123!"
+DEFAULT_MESH_SUBNET = "10.147.20.0/24"
+
 def load_config():
     defaults = {
         "web_port": 8080,
         "zt_port": 9993,
         "public_ip": "",
-        "admin_user": "admin",
-        "admin_pass": "admin",
+        "admin_user": DEFAULT_ADMIN_USER,
+        "admin_pass": DEFAULT_ADMIN_PASS,
         "network_id": "",
-        "server_virtual_ip": "10.147.20.177"
+        "server_virtual_ip": "",
+        "mesh_subnet": DEFAULT_MESH_SUBNET,
+        "bootstrap_token": ""
     }
     if os.path.exists(CONFIG_FILE):
         try:
@@ -42,24 +50,70 @@ def load_config():
                 defaults.update(data)
         except Exception as e:
             print(f"[Config Error] Failed to read {CONFIG_FILE}: {e}")
+            # Falling back to `defaults` here would silently downgrade the
+            # admin credential to the well-known public default. Serve from
+            # the last known-good copy instead.
+            backup = CONFIG_FILE + ".bak"
+            if os.path.exists(backup):
+                try:
+                    with open(backup, 'r') as f:
+                        data = json.load(f)
+                    defaults.update(data)
+                    print(f"[Config] Recovered configuration from {backup}")
+                except Exception as e2:
+                    print(f"[Config Error] Backup {backup} is also unreadable: {e2}")
+                    defaults["admin_pass"] = ""
+            else:
+                # No recoverable copy: refuse to authenticate with the
+                # published default password rather than downgrade silently.
+                defaults["admin_pass"] = ""
     else:
         save_config(defaults)
     return defaults
 
+# Runtime-only values that must never be persisted to the config file.
+TRANSIENT_CONFIG_KEYS = ("lanIp", "lanIps")
+
 def save_config(cfg):
     try:
-        os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
-        with open(CONFIG_FILE, 'w') as f:
+        cfg = {k: v for k, v in cfg.items() if k not in TRANSIENT_CONFIG_KEYS}
+        # os.makedirs('') raises when the config path has no directory part.
+        cfg_dir = os.path.dirname(CONFIG_FILE)
+        if cfg_dir:
+            os.makedirs(cfg_dir, exist_ok=True)
+        # Atomic write: a crash mid-write must not corrupt the live config.
+        tmp_path = CONFIG_FILE + ".tmp"
+        with open(tmp_path, 'w') as f:
             json.dump(cfg, f, indent=2)
             f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, CONFIG_FILE)
     except Exception as e:
         print(f"[Config Error] Failed to save {CONFIG_FILE}: {e}")
 
 cfg_initial = load_config()
 PORT = cfg_initial.get("web_port", 8080)
 
+# Shared mutable state. The IP-watcher thread and the request threads both
+# touch these, so every access is guarded by state_lock.
+state_lock = threading.Lock()
 manual_disconnects = set()
 recent_kicks = {}  # member_id -> timestamp
+# Members this server itself de-authorized. Only these may be re-authorized
+# automatically; an operator's manual revocation must be respected.
+auto_authorized = set()
+
+# A kick is only reported to the client for a short window; older entries are
+# pruned so the dict cannot grow without bound.
+KICK_TTL_SECONDS = 20
+
+def prune_recent_kicks():
+    """Drop kick entries that are past their TTL. Caller must hold state_lock."""
+    now = time.time()
+    stale = [mid for mid, ts in recent_kicks.items() if now - ts >= KICK_TTL_SECONDS]
+    for mid in stale:
+        recent_kicks.pop(mid, None)
 
 def load_banned_members():
     if os.path.exists(BANNED_FILE):
@@ -71,11 +125,36 @@ def load_banned_members():
     return set()
 
 def save_banned_members(banned_set):
+    # Write to a temp file and rename so a crash mid-write cannot leave a
+    # truncated ban list on disk.
+    tmp_path = BANNED_FILE + ".tmp"
     try:
-        with open(BANNED_FILE, 'w') as f:
+        with open(tmp_path, 'w') as f:
             json.dump(list(banned_set), f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, BANNED_FILE)
     except Exception as e:
         print(f"[Banned Error] {e}")
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+
+def normalize_member_id(raw):
+    """Validate a ZeroTier member id and return it lower-cased.
+
+    A ZeroTier address is exactly 10 hexadecimal characters. Anything else is
+    rejected before it reaches a controller URL path, which prevents path
+    injection (e.g. "../controller/network") through the query string.
+    """
+    if not raw:
+        return None
+    cid = raw.strip().lower()
+    if not re.fullmatch(r'[0-9a-f]{10}', cid):
+        return None
+    return cid
 
 def get_auth_token():
     token_path = os.path.join(ZT_DIR, 'authtoken.secret')
@@ -90,10 +169,10 @@ def zt_api_request(path, method='GET', data=None):
     zt_port = cfg.get("zt_port", 9993)
     url = f"http://127.0.0.1:{zt_port}{path}"
     headers = {'X-ZT1-Auth': token, 'Content-Type': 'application/json'}
-    req = urllib.request.Request(url, headers=headers, method=method)
-    if data is not None:
-        req.data = json.dumps(data).encode('utf-8')
     try:
+        req = urllib.request.Request(url, headers=headers, method=method)
+        if data is not None:
+            req.data = json.dumps(data).encode('utf-8')
         with urllib.request.urlopen(req, timeout=5) as resp:
             return json.loads(resp.read().decode('utf-8'))
     except Exception as e:
@@ -122,14 +201,19 @@ def get_peers_map():
     return peer_map
 
 def get_lan_ip():
+    s = None
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
+        return s.getsockname()[0]
     except Exception:
         pass
+    finally:
+        if s is not None:
+            try:
+                s.close()
+            except Exception:
+                pass
     try:
         return socket.gethostbyname(socket.gethostname())
     except Exception:
@@ -156,10 +240,73 @@ def get_server_network_id():
     net_id = cfg.get("network_id", "").strip()
     if net_id:
         return net_id
-    # Auto-detect from local controller
+    # Auto-detect from local controller. The endpoint returns a list of
+    # network OBJECTS, so we must pull the id out of the first entry.
     nets = zt_api_request("/controller/network")
     if isinstance(nets, list) and len(nets) > 0:
-        return nets[0]
+        first = nets[0]
+        if isinstance(first, dict):
+            return first.get("id") or first.get("nwid") or ""
+        if isinstance(first, str):
+            return first
+    return ""
+
+def get_server_virtual_ip():
+    """Resolve the server's own virtual (ZeroTier) IP.
+
+    Order of preference:
+      1. Explicit `server_virtual_ip` from config.json.
+      2. The address ZeroTier actually assigned to this node.
+      3. Empty string when the node has not joined a network yet.
+    """
+    cfg = load_config()
+    configured = cfg.get("server_virtual_ip", "").strip()
+    if configured:
+        return configured
+
+    # Ask the local ZeroTier daemon which address it holds on the mesh.
+    # The controller's OWN member entry is the one whose id matches this
+    # node's address - other members must not be mistaken for the server.
+    try:
+        status = zt_api_request("/status")
+        own_id = ""
+        if isinstance(status, dict):
+            own_id = (status.get("address") or "").lower()
+
+        nets = zt_api_request("/controller/network")
+        if isinstance(nets, list):
+            for n in nets:
+                net_id = n.get("id", "") if isinstance(n, dict) else ""
+                if not net_id:
+                    continue
+                member = zt_api_request(f"/controller/network/{net_id}/member")
+                if isinstance(member, dict) and own_id:
+                    own_entry = member.get(own_id)
+                    if isinstance(own_entry, dict):
+                        for ip in own_entry.get("ipAssignments", []):
+                            if ip:
+                                return ip
+    except Exception:
+        pass
+
+    # Fall back to the addresses ZeroTier assigned to this node.
+    # `zerotier-cli listnetworks` reports the assigned IP as a dotted quad in
+    # the "address" column of the plain-text output.
+    try:
+        out = subprocess.check_output(
+            ['zerotier-cli', 'listnetworks'],
+            stderr=subprocess.DEVNULL
+        ).decode('utf-8', 'ignore')
+        for line in out.splitlines():
+            if ' listnetworks ' in line:
+                continue
+            parts = line.split()
+            for tok in parts:
+                if re.fullmatch(r'\d+\.\d+\.\d+\.\d+/\d+', tok):
+                    return tok.split('/')[0]
+    except Exception:
+        pass
+
     return ""
 
 def update_moon_for_ip(new_ip=None, zt_port=None, public_ip=None):
@@ -169,19 +316,28 @@ def update_moon_for_ip(new_ip=None, zt_port=None, public_ip=None):
     if public_ip is None:
         public_ip = cfg.get("public_ip", "").strip()
     all_lan = get_all_lan_ips()
+
+    # Work inside a scratch directory instead of os.chdir() so the process-wide
+    # working directory is never mutated (it would corrupt relative paths used
+    # by other threads and by IP_TRACK_FILE / APP_DIR writes).
+    workdir = os.path.join(ZT_DIR, "openmesh-moonwork")
     try:
         print(f"[Auto-IP] Updating Moon for LAN IPs: {all_lan}, Public IP: '{public_ip}' on ZeroTier port: {zt_port}")
-        os.chdir(ZT_DIR)
+        os.makedirs(workdir, exist_ok=True)
 
         conf_path = os.path.join(ZT_DIR, 'local.conf')
         local_conf = {"settings": {"primaryPort": int(zt_port)}}
         with open(conf_path, 'w') as f:
             json.dump(local_conf, f, indent=2)
             f.write("\n")
-        
-        raw_moon = subprocess.check_output(['zerotier-idtool', 'initmoon', 'identity.public']).decode()
+
+        identity_public = os.path.join(ZT_DIR, "identity.public")
+        raw_moon = subprocess.check_output(
+            ['zerotier-idtool', 'initmoon', identity_public],
+            cwd=workdir
+        ).decode()
         moon_data = json.loads(raw_moon)
-        
+
         endpoints = []
         if public_ip:
             endpoints.append(f"{public_ip}/{zt_port}")
@@ -189,65 +345,102 @@ def update_moon_for_ip(new_ip=None, zt_port=None, public_ip=None):
             ep = f"{lip}/{zt_port}"
             if ep not in endpoints:
                 endpoints.append(ep)
-        
+
         hostname = socket.gethostname()
         endpoints.append(f"{hostname}.local/{zt_port}")
         moon_data['roots'][0]['stableEndpoints'] = endpoints
-        
-        with open('moon.json', 'w') as f:
+
+        moon_json_path = os.path.join(workdir, 'moon.json')
+        with open(moon_json_path, 'w') as f:
             json.dump(moon_data, f, indent=2)
-            
-        subprocess.check_call(['zerotier-idtool', 'genmoon', 'moon.json'])
-        
-        os.makedirs('moons.d', exist_ok=True)
-        for fname in os.listdir('.'):
+
+        subprocess.check_call(['zerotier-idtool', 'genmoon', moon_json_path], cwd=workdir)
+
+        # Publish the freshly signed moon to every location ZeroTier reads it from.
+        moons_d = os.path.join(ZT_DIR, "moons.d")
+        os.makedirs(moons_d, exist_ok=True)
+        for fname in os.listdir(workdir):
             if fname.startswith('000000') and fname.endswith('.moon'):
-                shutil.copy(fname, os.path.join('moons.d', fname))
-                shutil.copy(fname, os.path.join(APP_DIR, fname))
+                src = os.path.join(workdir, fname)
+                shutil.copy(src, os.path.join(moons_d, fname))
+                shutil.copy(src, os.path.join(APP_DIR, fname))
                 print(f"[Auto-IP] Installed new moon: {fname}")
-                
+
         subprocess.check_call(['systemctl', 'restart', 'zerotier-one'])
-        
-        primary_ip = all_lan[0] if all_lan else get_lan_ip()
-        with open(IP_TRACK_FILE, 'w') as f:
-            f.write(primary_ip)
-            
+
+        # Store the same address the watcher compares against, otherwise the
+        # two values diverge on multi-homed hosts and the moon is rebuilt in a
+        # loop.
+        primary_ip = get_lan_ip()
+        set_tracked_ip(primary_ip)
+
         print("[Auto-IP] Moon update completed successfully!")
         return True, "Moon updated successfully"
     except Exception as e:
         print(f"[Auto-IP ERROR] {e}")
         return False, str(e)
 
+def get_tracked_ip():
+    try:
+        if os.path.exists(IP_TRACK_FILE):
+            with open(IP_TRACK_FILE) as f:
+                return f.read().strip()
+    except Exception:
+        pass
+    return ""
+
+def set_tracked_ip(ip):
+    try:
+        with open(IP_TRACK_FILE, 'w') as f:
+            f.write(ip or "")
+    except Exception as e:
+        print(f"[Watcher] Failed to persist tracked IP: {e}")
+
 def ip_monitor_loop():
     while True:
         try:
+            # Use exactly the same source of truth that update_moon_for_ip()
+            # persists, otherwise the comparison never converges and the moon
+            # is regenerated (and ZeroTier restarted) on every single tick.
             current_ip = get_lan_ip()
-            last_ip = ""
-            if os.path.exists(IP_TRACK_FILE):
-                with open(IP_TRACK_FILE) as f:
-                    last_ip = f.read().strip()
-            
+            last_ip = get_tracked_ip()
+
             if current_ip and current_ip != "127.0.0.1" and current_ip != last_ip:
                 print(f"[Watcher] LAN IP change detected! Old: '{last_ip}' -> New: '{current_ip}'")
+                # Persist BEFORE regenerating so a failure inside
+                # update_moon_for_ip() cannot cause an endless retry loop.
+                set_tracked_ip(current_ip)
                 update_moon_for_ip()
                 
             net_id = get_server_network_id()
             if net_id:
-                # Reconcile authorizations
+                # Reconcile authorizations. The member LIST already carries
+                # each member's authorization flag, so one controller call per
+                # tick is enough - querying every member separately made this
+                # an N+1 pattern that hammered the controller every 10s.
                 banned = load_banned_members()
                 members_raw = zt_api_request(f"/controller/network/{net_id}/member")
                 if isinstance(members_raw, dict) and "error" not in members_raw:
-                    for mid in members_raw.keys():
+                    for mid, minfo in members_raw.items():
+                        if not isinstance(minfo, dict):
+                            continue
                         m_lower = mid.lower()
-                        minfo = zt_api_request(f"/controller/network/{net_id}/member/{mid}")
-                        if isinstance(minfo, dict) and "error" not in minfo:
-                            curr_auth = minfo.get("authorized", False)
-                            if m_lower in banned:
-                                if curr_auth:
-                                    zt_api_request(f"/controller/network/{net_id}/member/{mid}", method='POST', data={"authorized": False})
-                            else:
-                                if not curr_auth:
-                                    zt_api_request(f"/controller/network/{net_id}/member/{mid}", method='POST', data={"authorized": True})
+                        curr_auth = minfo.get("authorized", False)
+                        if m_lower in banned:
+                            if curr_auth:
+                                zt_api_request(f"/controller/network/{net_id}/member/{mid}",
+                                               method='POST', data={"authorized": False})
+                                with state_lock:
+                                    auto_authorized.discard(m_lower)
+                        else:
+                            # Only re-authorize a member that WE de-authorized.
+                            # A member the operator revoked on purpose (in the
+                            # ZeroTier controller UI, for example) must stay
+                            # revoked - the watcher used to undo that every tick.
+                            if not curr_auth and m_lower in auto_authorized:
+                                zt_api_request(f"/controller/network/{net_id}/member/{mid}",
+                                               method='POST', data={"authorized": True})
+                                auto_authorized.discard(m_lower)
         except Exception as e:
             print(f"[Watcher Exception] {e}")
             
@@ -341,7 +534,7 @@ HTML_PAGE = """<!DOCTYPE html>
             </div>
             <div class="card">
                 <div class="card-title">Server Virtual IP</div>
-                <div class="card-val" id="server-virt-ip" style="color: #38bdf8;">10.147.20.177</div>
+                <div class="card-val" id="server-virt-ip" style="color: #38bdf8;">--</div>
                 <div class="card-sub">Core Gaming Node</div>
             </div>
             <div class="card">
@@ -665,21 +858,71 @@ HTML_PAGE = """<!DOCTYPE html>
 """
 
 class DashboardHandler(http.server.BaseHTTPRequestHandler):
+    # A client that announces a body and then stops sending must not pin a
+    # worker thread forever.
+    timeout = 30
     def check_auth(self):
         cfg = load_config()
-        admin_user = cfg.get("admin_user", "admin")
-        admin_pass = cfg.get("admin_pass", "admin")
+        admin_user = cfg.get("admin_user", DEFAULT_ADMIN_USER)
+        admin_pass = cfg.get("admin_pass", DEFAULT_ADMIN_PASS)
         expected = "Basic " + base64.b64encode(f"{admin_user}:{admin_pass}".encode()).decode('ascii')
         
         auth_header = self.headers.get('Authorization')
-        if auth_header and auth_header == expected:
-            return True
+        if auth_header:
+            # Compare in constant time to avoid leaking the credential byte by byte.
+            if hmac.compare_digest(auth_header, expected):
+                return True
         self.send_response(401)
         self.send_header('WWW-Authenticate', 'Basic realm="OpenMesh Gaming Core"')
         self.send_header('Content-Type', 'text/html; charset=utf-8')
         self.end_headers()
         self.wfile.write(b"<html><body style='background:#0b0d14;color:#ef4444;font-family:sans-serif;text-align:center;padding:50px;'><h1>401 Unauthorized</h1><p style='color:#94a3b8;'>Access to OpenMesh Gaming Core is restricted.<br>Please log in with valid credentials.</p></body></html>")
         return False
+
+    def send_bad_request(self, message="Invalid member id"):
+        self.send_response(400)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(json.dumps({"error": message}).encode('utf-8'))
+
+    def has_bootstrap_token(self):
+        """True when the request carries the shared bootstrap token.
+
+        The bootstrap token lets a client that has not joined the mesh yet
+        reach the three endpoints it needs before joining. It grants nothing
+        beyond those endpoints and is separate from the admin credential.
+        """
+        cfg = load_config()
+        token = (cfg.get("bootstrap_token", "") or "").strip()
+        if not token:
+            return False
+        supplied = self.headers.get('X-OpenMesh-Bootstrap')
+        if not supplied:
+            return False
+        return hmac.compare_digest(supplied.strip(), token)
+
+    def client_allowed(self):
+        """Authorisation gate for the client-facing bootstrap endpoints."""
+        return self.is_mesh_request() or self.has_bootstrap_token() or self.check_auth()
+
+    def is_mesh_request(self):
+        """True when the request arrived over the ZeroTier mesh interface.
+
+        The mesh subnet is private and only reachable by nodes that have been
+        authorized by the controller, so client bootstrap endpoints can be
+        served to them without an admin credential. Everything else stays
+        behind Basic Auth.
+        """
+        try:
+            peer = self.client_address[0]
+        except Exception:
+            return False
+        cfg = load_config()
+        net = ipaddress.ip_network(cfg.get("mesh_subnet", DEFAULT_MESH_SUBNET), strict=False)
+        try:
+            return ipaddress.ip_address(peer) in net
+        except ValueError:
+            return False
 
     def do_HEAD(self):
         return self.do_GET()
@@ -692,6 +935,11 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
 
         # Moon file download endpoint
         if self.path == '/download/moon':
+            # The moon root defines the mesh root of trust. Only mesh peers,
+            # holders of the bootstrap token, or an authenticated admin may
+            # fetch it.
+            if not self.client_allowed():
+                return
             moon_file = None
             for d in [ZT_DIR, APP_DIR]:
                 for f in os.listdir(d):
@@ -716,6 +964,9 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
 
         # Client Health / Kick & Ban Status endpoint
         if self.path.startswith('/api/client_check'):
+            # Bootstrapped by the client before it holds any credential.
+            if not self.client_allowed():
+                return
             query = urllib.parse.urlparse(self.path).query
             params = urllib.parse.parse_qs(query)
             client_id = params.get('id', [None])[0]
@@ -727,11 +978,15 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
             kick_ts = 0
             
             if client_id:
-                cid = client_id.strip().lower()
+                cid = normalize_member_id(client_id)
+                if not cid:
+                    cid = client_id.strip().lower()
                 is_banned = cid in banned_members
-                if cid in recent_kicks:
-                    kick_ts = recent_kicks[cid]
-                    is_kicked = (time.time() - kick_ts < 20)
+                with state_lock:
+                    prune_recent_kicks()
+                    if cid in recent_kicks:
+                        kick_ts = recent_kicks[cid]
+                        is_kicked = (time.time() - kick_ts < KICK_TTL_SECONDS)
                 
                 if net_id:
                     minfo = zt_api_request(f"/controller/network/{net_id}/member/{cid}")
@@ -740,7 +995,7 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
                         
             resp = {
                 "networkId": net_id,
-                "serverVirtualIp": cfg.get("server_virtual_ip", "10.147.20.177"),
+                "serverVirtualIp": get_server_virtual_ip(),
                 "isBanned": is_banned,
                 "isKicked": is_kicked,
                 "kickTimestamp": int(kick_ts * 1000),
@@ -756,27 +1011,37 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
 
         # Client Disconnect endpoint
         if self.path.startswith('/api/client_disconnect'):
+            if not self.client_allowed():
+                return
             query = urllib.parse.urlparse(self.path).query
             params = urllib.parse.parse_qs(query)
             client_id = params.get('id', [None])[0]
             if client_id:
-                manual_disconnects.add(client_id.strip().lower())
+                cid = normalize_member_id(client_id) or client_id.strip().lower()
+                with state_lock:
+                    manual_disconnects.add(cid)
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(b'{"status":"disconnected"}')
             return
 
         # Client Connect endpoint
         if self.path.startswith('/api/client_connect'):
+            # This endpoint authorizes a node on the controller, so it must be
+            # restricted to mesh peers, bootstrap token holders, or an admin.
+            if not self.client_allowed():
+                return
             query = urllib.parse.urlparse(self.path).query
             params = urllib.parse.parse_qs(query)
             client_id = params.get('id', [None])[0]
             if client_id and net_id:
-                cid = client_id.strip().lower()
-                manual_disconnects.discard(cid)
-                recent_kicks.pop(cid, None)
+                cid = normalize_member_id(client_id)
+                if not cid:
+                    cid = client_id.strip().lower()
+                with state_lock:
+                    manual_disconnects.discard(cid)
+                    recent_kicks.pop(cid, None)
                 banned = load_banned_members()
                 if cid not in banned:
                     zt_api_request(f"/controller/network/{net_id}/member/{cid}", method='POST', data={"authorized": True})
@@ -813,12 +1078,16 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
                     m_lower = member_id.lower()
                     m_info = zt_api_request(f"/controller/network/{net_id}/member/{member_id}")
                     is_banned = (m_lower in banned)
-                    is_kicked = (m_lower in recent_kicks) and (time.time() - recent_kicks[m_lower] < 18)
+                    with state_lock:
+                        _kick_ts = recent_kicks.get(m_lower)
+                    is_kicked = (_kick_ts is not None) and (time.time() - _kick_ts < KICK_TTL_SECONDS)
                     is_auth = m_info.get("authorized", False) and (not is_banned)
                     
                     is_srv = (m_lower == server_node_id)
                     p_info = peers_map.get(m_lower, {})
-                    is_online = is_srv or (p_info.get("online", False) and m_lower not in manual_disconnects and not is_kicked)
+                    with state_lock:
+                        _was_disconnected = m_lower in manual_disconnects
+                    is_online = is_srv or (p_info.get("online", False) and not _was_disconnected and not is_kicked)
                     last_seen = 0 if is_srv else p_info.get("lastSeenSec", 9999)
 
                     members_list.append({
@@ -835,13 +1104,15 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
             
             status_data = {
                 "networkId": net_id,
-                "serverVirtualIp": cfg.get("server_virtual_ip", "10.147.20.177"),
+                "serverVirtualIp": get_server_virtual_ip(),
                 "lanIp": ", ".join(all_ips) if all_ips else primary_lan,
                 "lanIps": all_ips,
                 "webPort": cfg.get("web_port", 8080),
                 "ztPort": cfg.get("zt_port", 9993),
                 "publicIp": cfg.get("public_ip", ""),
-                "adminUser": cfg.get("admin_user", "admin"),
+                "adminUser": cfg.get("admin_user", DEFAULT_ADMIN_USER),
+                "adminPassSet": bool(cfg.get("admin_pass") and
+                                    cfg.get("admin_pass") != DEFAULT_ADMIN_PASS),
                 "hostname": socket.gethostname(),
                 "members": members_list
             }
@@ -854,13 +1125,20 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
             return
 
         elif self.path == '/api/settings':
-            cfg['lanIp'] = ", ".join(all_ips) if all_ips else primary_lan
-            cfg['lanIps'] = all_ips
+            # Never return the admin credential to the browser: the dashboard
+            # JS does not need it, and it would land in devtools / any proxy
+            # or log that captures the response.
+            safe_cfg = {k: v for k, v in cfg.items()
+                        if k not in ("admin_pass", "bootstrap_token")}
+            safe_cfg["lanIp"] = ", ".join(all_ips) if all_ips else primary_lan
+            safe_cfg["lanIps"] = all_ips
+            safe_cfg["adminPassSet"] = bool(cfg.get("admin_pass") and
+                                            cfg.get("admin_pass") != DEFAULT_ADMIN_PASS)
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
-            self.wfile.write(json.dumps(cfg).encode('utf-8'))
+            self.wfile.write(json.dumps(safe_cfg).encode('utf-8'))
             return
                 
         self.send_error(404, "Not Found")
@@ -869,11 +1147,15 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
         net_id = get_server_network_id()
 
         if self.path.startswith('/api/client_disconnect'):
+            if not self.client_allowed():
+                return
             query = urllib.parse.urlparse(self.path).query
             params = urllib.parse.parse_qs(query)
             client_id = params.get('id', [None])[0]
             if client_id:
-                manual_disconnects.add(client_id.strip().lower())
+                cid = normalize_member_id(client_id) or client_id.strip().lower()
+                with state_lock:
+                    manual_disconnects.add(cid)
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.send_header('Access-Control-Allow-Origin', '*')
@@ -882,13 +1164,18 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
             return
 
         if self.path.startswith('/api/client_connect'):
+            if not self.client_allowed():
+                return
             query = urllib.parse.urlparse(self.path).query
             params = urllib.parse.parse_qs(query)
             client_id = params.get('id', [None])[0]
             if client_id and net_id:
-                cid = client_id.strip().lower()
-                manual_disconnects.discard(cid)
-                recent_kicks.pop(cid, None)
+                cid = normalize_member_id(client_id)
+                if not cid:
+                    cid = client_id.strip().lower()
+                with state_lock:
+                    manual_disconnects.discard(cid)
+                    recent_kicks.pop(cid, None)
                 banned = load_banned_members()
                 if cid not in banned:
                     zt_api_request(f"/controller/network/{net_id}/member/{cid}", method='POST', data={"authorized": True})
@@ -903,7 +1190,17 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
             return
 
         if self.path == '/api/settings':
-            content_length = int(self.headers.get('Content-Length', 0))
+            try:
+                content_length = int(self.headers.get('Content-Length', 0) or 0)
+            except (TypeError, ValueError):
+                content_length = 0
+            # Cap the body: a bogus Content-Length would otherwise block this
+            # worker thread forever.
+            if content_length < 0 or content_length > 1024 * 1024:
+                self.send_response(400)
+                self.end_headers()
+                self.wfile.write(b'{"error": "Invalid Content-Length."}')
+                return
             post_body = self.rfile.read(content_length)
             try:
                 data = json.loads(post_body.decode('utf-8'))
@@ -974,17 +1271,21 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
             query = urllib.parse.urlparse(self.path).query
             params = urllib.parse.parse_qs(query)
             member_id = params.get('id', [None])[0]
-            if member_id and net_id:
-                m_lower = member_id.strip().lower()
-                recent_kicks[m_lower] = time.time()
-                manual_disconnects.add(m_lower)
-                zt_api_request(f"/controller/network/{net_id}/member/{member_id}", method='POST', data={"authorized": False})
-                
+            m_lower = normalize_member_id(member_id)
+            if not m_lower:
+                self.send_bad_request("Member id must be a 10-character hex ZeroTier address")
+                return
+            if m_lower and net_id:
+                with state_lock:
+                    recent_kicks[m_lower] = time.time()
+                    manual_disconnects.add(m_lower)
+                zt_api_request(f"/controller/network/{net_id}/member/{m_lower}", method='POST', data={"authorized": False})
+
                 def reauth():
                     time.sleep(2)
                     banned = load_banned_members()
                     if m_lower not in banned:
-                        zt_api_request(f"/controller/network/{net_id}/member/{member_id}", method='POST', data={"authorized": True})
+                        zt_api_request(f"/controller/network/{net_id}/member/{m_lower}", method='POST', data={"authorized": True})
                 threading.Thread(target=reauth, daemon=True).start()
                 
             self.send_response(200)
@@ -997,14 +1298,18 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
             query = urllib.parse.urlparse(self.path).query
             params = urllib.parse.parse_qs(query)
             member_id = params.get('id', [None])[0]
-            if member_id and net_id:
-                m_lower = member_id.strip().lower()
+            m_lower = normalize_member_id(member_id)
+            if not m_lower:
+                self.send_bad_request("Member id must be a 10-character hex ZeroTier address")
+                return
+            if m_lower and net_id:
                 banned = load_banned_members()
                 banned.add(m_lower)
                 save_banned_members(banned)
-                recent_kicks.pop(m_lower, None)
-                manual_disconnects.add(m_lower)
-                zt_api_request(f"/controller/network/{net_id}/member/{member_id}", method='POST', data={"authorized": False})
+                with state_lock:
+                    recent_kicks.pop(m_lower, None)
+                    manual_disconnects.add(m_lower)
+                zt_api_request(f"/controller/network/{net_id}/member/{m_lower}", method='POST', data={"authorized": False})
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
@@ -1015,14 +1320,18 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
             query = urllib.parse.urlparse(self.path).query
             params = urllib.parse.parse_qs(query)
             member_id = params.get('id', [None])[0]
-            if member_id and net_id:
-                m_lower = member_id.strip().lower()
+            m_lower = normalize_member_id(member_id)
+            if not m_lower:
+                self.send_bad_request("Member id must be a 10-character hex ZeroTier address")
+                return
+            if m_lower and net_id:
                 banned = load_banned_members()
                 banned.discard(m_lower)
                 save_banned_members(banned)
-                manual_disconnects.discard(m_lower)
-                recent_kicks.pop(m_lower, None)
-                zt_api_request(f"/controller/network/{net_id}/member/{member_id}", method='POST', data={"authorized": True})
+                with state_lock:
+                    manual_disconnects.discard(m_lower)
+                    recent_kicks.pop(m_lower, None)
+                zt_api_request(f"/controller/network/{net_id}/member/{m_lower}", method='POST', data={"authorized": True})
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
@@ -1033,14 +1342,18 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
             query = urllib.parse.urlparse(self.path).query
             params = urllib.parse.parse_qs(query)
             member_id = params.get('id', [None])[0]
-            if member_id and net_id:
-                m_lower = member_id.strip().lower()
+            m_lower = normalize_member_id(member_id)
+            if not m_lower:
+                self.send_bad_request("Member id must be a 10-character hex ZeroTier address")
+                return
+            if m_lower and net_id:
                 banned = load_banned_members()
                 banned.discard(m_lower)
                 save_banned_members(banned)
-                manual_disconnects.discard(m_lower)
-                recent_kicks.pop(m_lower, None)
-                zt_api_request(f"/controller/network/{net_id}/member/{member_id}", method='DELETE')
+                with state_lock:
+                    manual_disconnects.discard(m_lower)
+                    recent_kicks.pop(m_lower, None)
+                zt_api_request(f"/controller/network/{net_id}/member/{m_lower}", method='DELETE')
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
@@ -1054,7 +1367,7 @@ class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 if __name__ == '__main__':
     cfg = load_config()
-    port = cfg.get("web_port", 8080)
+    port = cfg.get('web_port', 8080)
     server = ThreadedHTTPServer(('0.0.0.0', port), DashboardHandler)
     all_lan = get_all_lan_ips()
     print(f"==================================================")
@@ -1062,7 +1375,15 @@ if __name__ == '__main__':
     print(f"Local LAN Dashboard: http://{all_lan[0] if all_lan else '127.0.0.1'}:{port}")
     if cfg.get('public_ip'):
         print(f"Public WAN Dashboard: http://{cfg.get('public_ip')}:{port}")
-    print(f"Admin User: {cfg.get('admin_user', 'admin')}")
+    print(f"Admin User: {cfg.get('admin_user', DEFAULT_ADMIN_USER)}")
+    virt_ip = get_server_virtual_ip()
+    print(f"Server Virtual IP: {virt_ip if virt_ip else '(not joined yet)'}")
+    if cfg.get('admin_pass') == DEFAULT_ADMIN_PASS:
+        print("-" * 50)
+        print(f"⚠️  WARNING: using the default admin password!")
+        print(f"    Change it before exposing this dashboard to the Internet.")
+        print(f"    Edit: {CONFIG_FILE}")
+        print("-" * 50)
     print(f"==================================================")
     try:
         server.serve_forever()

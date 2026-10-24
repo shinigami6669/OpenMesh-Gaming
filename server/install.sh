@@ -80,6 +80,34 @@ echo -e "${GREEN}[+] Detected Server Node ID: ${NODE_ID}${NC}"
 NETWORK_ID="${NODE_ID}000001"
 echo -e "${GREEN}[+] Autonomous Gaming Network ID: ${NETWORK_ID}${NC}"
 
+# Mesh subnet (must not clash with your real LAN)
+if [ -z "$MESH_SUBNET" ]; then
+    if [ -t 0 ]; then
+        read -p "Enter Mesh subnet [default: 10.147.20.0/24]: " MESH_SUBNET
+    fi
+    MESH_SUBNET=${MESH_SUBNET:-10.147.20.0/24}
+fi
+
+# Derive the address pool from the subnet
+MESH_PREFIX=$(echo "$MESH_SUBNET" | cut -d/ -f1)          # e.g. 10.147.20.0
+MESH_BITS=$(echo "$MESH_SUBNET" | cut -d/ -f2)           # e.g. 24
+MESH_OCTET1=$(echo "$MESH_PREFIX" | cut -d. -f1)
+MESH_OCTET2=$(echo "$MESH_PREFIX" | cut -d. -f2)
+MESH_OCTET3=$(echo "$MESH_PREFIX" | cut -d. -f3)
+POOL_START="${MESH_OCTET1}.${MESH_OCTET2}.${MESH_OCTET3}.1"
+POOL_END="${MESH_OCTET1}.${MESH_OCTET2}.${MESH_OCTET3}.254"
+
+# Server static virtual IP inside the mesh
+if [ -z "$SERVER_VIRTUAL_IP" ]; then
+    if [ -t 0 ]; then
+        read -p "Enter Server Virtual IP [default: ${MESH_OCTET1}.${MESH_OCTET2}.${MESH_OCTET3}.177]: " SERVER_VIRTUAL_IP
+    fi
+    SERVER_VIRTUAL_IP=${SERVER_VIRTUAL_IP:-${MESH_OCTET1}.${MESH_OCTET2}.${MESH_OCTET3}.177}
+fi
+
+echo -e "${GREEN}[+] Mesh subnet: ${MESH_SUBNET} (pool ${POOL_START}-${POOL_END})${NC}"
+echo -e "${GREEN}[+] Server virtual IP: ${SERVER_VIRTUAL_IP}${NC}"
+
 # 3. Create Network on Local ZeroTier Controller
 echo -e "${CYAN}[4/6] Provisioning Network on local ZeroTier Controller...${NC}"
 AUTH_HEADER="X-ZT1-Auth: ${TOKEN}"
@@ -91,13 +119,13 @@ NET_PAYLOAD=$(cat <<EOF
   "v4AssignMode": {"zt": true},
   "ipAssignmentPools": [
     {
-      "ipRangeStart": "10.147.20.1",
-      "ipRangeEnd": "10.147.20.254"
+      "ipRangeStart": "${POOL_START}",
+      "ipRangeEnd": "${POOL_END}"
     }
   ],
   "routes": [
     {
-      "target": "10.147.20.0/24",
+      "target": "${MESH_SUBNET}",
       "via": null
     }
   ]
@@ -112,11 +140,11 @@ curl -s -X POST -H "$AUTH_HEADER" -H "Content-Type: application/json" \
 # Join server node itself to the network
 zerotier-cli join "$NETWORK_ID" >/dev/null 2>&1 || true
 
-# Authorize server node and assign static 10.147.20.177
+# Authorize server node and assign its static virtual IP
 MEMBER_PAYLOAD=$(cat <<EOF
 {
   "authorized": true,
-  "ipAssignments": ["10.147.20.177"]
+  "ipAssignments": ["${SERVER_VIRTUAL_IP}"]
 }
 EOF
 )
@@ -218,6 +246,11 @@ if [ -n "$MOON_FILE" ] && [ -f "${ZT_DIR}/${MOON_FILE}" ]; then
     cp "${ZT_DIR}/${MOON_FILE}" "${APP_DIR}/${MOON_FILE}"
 fi
 
+# Generate a bootstrap token. Clients need it to reach the three endpoints
+# they use before they have joined the mesh (client_check, client_connect and
+# the moon download). It grants nothing beyond those endpoints.
+BOOTSTRAP_TOKEN="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+
 # Write config.json
 cat > "${APP_DIR}/config.json" <<EOF
 {
@@ -227,7 +260,8 @@ cat > "${APP_DIR}/config.json" <<EOF
   "admin_user": "${ADMIN_USER}",
   "admin_pass": "${ADMIN_PASS}",
   "network_id": "${NETWORK_ID}",
-  "server_virtual_ip": "10.147.20.177"
+  "server_virtual_ip": "${SERVER_VIRTUAL_IP}",
+  "bootstrap_token": "${BOOTSTRAP_TOKEN}"
 }
 EOF
 
@@ -259,8 +293,15 @@ fi
 echo -e "  👤 Admin Username:   ${YELLOW}${ADMIN_USER}${NC}"
 echo -e "  🔑 Admin Password:   ${YELLOW}${ADMIN_PASS}${NC}"
 echo -e "  🎮 Gaming Network ID:${CYAN}${NETWORK_ID}${NC}"
+echo -e "  🖧 Server Virtual IP:${CYAN}${SERVER_VIRTUAL_IP}${NC}"
+echo -e "  🌐 Mesh Subnet:      ${CYAN}${MESH_SUBNET}${NC}"
 echo -e "  🌙 Moon File:        ${CYAN}http://${PRIMARY_IP}:${WEB_PORT}/download/moon${NC}"
+echo -e "  🔌 Bootstrap Token:  ${YELLOW}${BOOTSTRAP_TOKEN}${NC}"
 echo -e "${GREEN}================================================================${NC}"
+echo -e "${YELLOW}💡 Bootstrap Token Note:${NC}"
+echo -e "   Enter this token in the client (Settings -> Bootstrap Token) so it can"
+echo -e "   reach the server before it has joined the mesh. It is also stored in"
+echo -e "   ${APP_DIR}/config.json and can be rotated there."
 echo -e "${YELLOW}💡 Router Port Forwarding Notice:${NC}"
 echo -e "   For friends to connect over the Internet, forward in your router:"
 echo -e "   - ${CYAN}UDP 9993${NC} ➔ ${PRIMARY_IP}"

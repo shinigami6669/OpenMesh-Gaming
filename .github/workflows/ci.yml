@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  server:
+    name: Server (Python)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+
+      - name: Byte-compile server
+        run: python3 -m py_compile server/server.py
+
+      - name: Verify shell scripts are valid
+        run: |
+          for f in server/*.sh; do
+            echo "checking $f"
+            bash -n "$f"
+          done
+
+      - name: Validate example configs are valid JSON
+        run: |
+          python3 -c "import json; json.load(open('server/config.example.json')); print('server config ok')"
+          python3 -c "import json; json.load(open('client/config.example.json')); print('client config ok')"
+
+  client:
+    name: Client (C#)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Windows client
+        working-directory: client
+        shell: cmd
+        run: build.bat

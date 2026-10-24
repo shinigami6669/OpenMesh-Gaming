@@ -23,11 +23,11 @@
 
 ---
 
-## 📖 Overview / معرفی پروژه
+## 📖 Overview
 
 **OpenMesh Gaming** is an open-source, production-ready virtual LAN mesh networking suite engineered for high-performance LAN multiplayer gaming, remote co-op, and offline peer-to-peer connectivity.
 
-Traditional solutions (Hamachi, Radmin VPN, or ZeroTier Cloud) rely heavily on centralized cloud servers in other countries. When high ping, network congestion, or strict DPI firewalls cause disconnections, your game sessions drop. 
+Traditional solutions (Hamachi, Radmin VPN, or ZeroTier Cloud) rely heavily on centralized cloud servers in other countries. When high ping, network congestion, or strict DPI firewalls cause disconnections, your game sessions drop.
 
 **OpenMesh Gaming eliminates all third-party cloud dependencies**:
 - Your Linux server (e.g., Raspberry Pi) acts as an **autonomous Network Controller** and a **Custom Moon Root Node**.
@@ -35,7 +35,7 @@ Traditional solutions (Hamachi, Radmin VPN, or ZeroTier Cloud) rely heavily on c
 - Local LAN traffic routes at 0–1 ms wire speed, while friends connecting over the Internet via router port forwarding experience rock-solid, direct gaming connections.
 
 > **توضیح فارسی:**
-> این پروژه یک پلتفرم گیمینگ و شبکه مش همتا‌به‌همتا (P2P) کاملاً مستقل و متن‌باز است که روی رزبری پای یا سرور لینوکس نصب می‌شود. برخلاف ردمین یا هاماچی، به هیچ سرور خارجی یا خارجی وابسته نیست؛ سرور و کنترلر تماماً روی سیستم خودتان اجرا شده و از یک روت مستقل (Moon) استفاده می‌کند تا در شرایط اختلال اینترنت یا شبکه محلی، پینگ مینیمم (کمتر از ۵ میلی‌ثانیه در شبکه محلی و اتصال مستقیم روی اینترنت) و پایداری ۱۰۰ درصدی فراهم کند.
+> این پروژه یک پلتفرم گیمینگ و شبکه مش همتا‌به‌همتا (P2P) کاملاً مستقل و متن‌باز است که روی رزبری پای یا سرور لینوکس نصب می‌شود. برخلاف ردمین یا هاماچی، به هیچ سرور خارجی وابسته نیست؛ سرور و کنترلر تماماً روی سیستم خودتان اجرا می‌شود و از یک روت مستقل (Moon) استفاده می‌کند تا در شرایط اختلال اینترنت یا شبکه محلی، پینگ مینیمم و پایداری بالا فراهم شود.
 
 ---
 
@@ -43,14 +43,15 @@ Traditional solutions (Hamachi, Radmin VPN, or ZeroTier Cloud) rely heavily on c
 
 - **🚀 1-Click Linux Installer (`install.sh`):**
   - Fully automated setup for Raspberry Pi OS, Debian, Ubuntu, and Linux Mint.
-  - Automatically provisions the ZeroTier controller daemon, assigns network IP pools (`10.147.20.0/24`), creates a signed Moon root, and sets up a `systemd` background service.
+  - Provisions the ZeroTier controller daemon, assigns a configurable IP pool, creates a signed Moon root, and sets up a `systemd` background service.
+  - **Fully parameterized:** mesh subnet, server virtual IP, admin credentials, dashboard port, and public IP are all configurable at install time.
 - **🛡️ 100% Autonomous & Offline-Ready:**
-  - Operates flawlessly on isolated local offline LANs (no public internet needed).
+  - Operates on isolated local offline LANs (no public internet needed).
   - Simultaneously supports remote players over the Internet via Static WAN IP or DDNS.
 - **🎛️ Cyber Dark Web Management Dashboard:**
   - Modern, responsive HTML5 web interface (no Node.js or heavy frameworks required; powered by pure Python 3).
   - Real-time connected players table with IP copy buttons, ping indicators, and online status.
-  - **Kick vs. Ban separation:** Kick players from current session without banning them, or permanently Ban/Unban rule-breakers with 1 click.
+  - **Kick vs. Ban separation:** Kick players from the current session without banning them, or permanently Ban/Unban rule-breakers with 1 click.
   - Moon auto-regeneration modal with dual LAN/WAN endpoint coexistence.
   - Built-in router port forwarding helper.
 - **🖥️ 1-Click C# Windows Client:**
@@ -58,7 +59,7 @@ Traditional solutions (Hamachi, Radmin VPN, or ZeroTier Cloud) rely heavily on c
   - **Bilingual Interface** with instant runtime switching between **English** and **Persian (فارسی)**.
   - **Instant Cancel/Disconnect** button allowing players to abort connection handshakes at any second without freezing.
   - Real-time ping monitors for Server Core, Host/Peer, and assigned Virtual IP.
-  - Auto-discovers server across local subnets or connects via configured public IP/domain.
+  - Auto-discovers the server across local subnets or connects via a configured public IP/domain.
   - Automatically downloads and syncs the server's signed Moon root without manual configuration.
   - Builds in seconds using the native C# compiler pre-installed on Windows (`csc.exe`).
 
@@ -84,13 +85,14 @@ Traditional solutions (Hamachi, Radmin VPN, or ZeroTier Cloud) rely heavily on c
         | (Windows 10/11 - 10.147.20.101) |   (< 5ms)     | (Windows 10/11 - 10.147.20.102) |
         +---------------------------------+               +---------------------------------+
 ```
+
 *For deep technical architecture details, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).*
 
 ---
 
 ## 🚀 Server Setup Scenarios
 
-Choose the setup scenario that matches your deployment environment:
+Choose the setup scenario that matches your deployment environment.
 
 ---
 
@@ -101,9 +103,9 @@ Use this scenario if you are hosting the server on a hardware device connected t
 * **Benefits:** Players on the same home Wi-Fi or Ethernet get wire-speed LAN routing with latency **< 1 ms**, and you retain 100% physical ownership of your hardware.
 * **Requirements for Remote Internet Friends:**
   1. **Static Public IP or DDNS:** Obtain a static public IP from your ISP or use a free DDNS service (e.g., DuckDNS).
-  2. **Router Port Forwarding:** Forward these two ports in your home router to your server's local LAN IP (e.g. `192.168.1.100`):
+  2. **Router Port Forwarding:** Forward these two ports in your home router to your server's local LAN IP (e.g., `192.168.1.100`):
      - **`9993`** (**UDP**) ➔ ZeroTier Mesh & Moon Root Traffic
-     - **`8080`** (**TCP**) ➔ Web Dashboard & Client Handshake  
+     - **`8080`** (**TCP**) ➔ Web Dashboard & Client Handshake
      *(See [docs/PORT_FORWARDING.md](docs/PORT_FORWARDING.md) for step-by-step router instructions).*
 * **Installation:**
   ```bash
@@ -112,7 +114,7 @@ Use this scenario if you are hosting the server on a hardware device connected t
   sudo chmod +x *.sh
   sudo ./install.sh
   ```
-  *(During installation, enter your modem's Public Static IP in the Public IP prompt).*
+  *(The installer prompts for the mesh subnet, server virtual IP, admin credentials, and — if you want Internet access — your modem's public static IP.)*
 
 ---
 
@@ -136,7 +138,7 @@ Use this scenario if you are hosting on an internet-facing cloud virtual machine
   sudo chmod +x *.sh
   sudo ./install.sh
   ```
-  *(During installation, enter your VPS public IP in the Public IP prompt).*
+  *(Enter your VPS public IP when prompted.)*
 
 ---
 
@@ -169,6 +171,7 @@ No Visual Studio or external SDK required! Simply run the build script in `clien
 cd client
 build.bat
 ```
+
 The script uses Windows' built-in C# compiler (`csc.exe`) and generates `OpenMeshGaming.exe`.
 
 #### Option B: Run and Connect
@@ -177,9 +180,23 @@ The script uses Windows' built-in C# compiler (`csc.exe`) and generates `OpenMes
 3. If connecting from outside over the Internet:
    - Click the **`⚙️ Settings`** button in the top right.
    - Enter your host's **Public Static IP or DDNS Domain**.
+   - Paste the **Bootstrap Token** printed by the installer (see below).
    - Click **Save Settings**.
 4. Click **`CONNECT TO GAMING LAN`**.
-5. The client downloads the server's Moon root, joins the network, and assigns your virtual gaming IP (e.g. `10.147.20.xxx`).
+5. The client downloads the server's Moon root, joins the network, and assigns your virtual gaming IP (e.g., `10.147.20.xxx`).
+
+> **Bootstrap Token**
+> The installer prints a **Bootstrap Token** and stores it in
+> `server/config.json` as `bootstrap_token`. A client needs it to reach the
+> server *before* it has joined the mesh — the Moon root download, the network
+> ID lookup and the controller-authorization request all happen before the
+> client has any mesh address, so they cannot be restricted to mesh peers
+> alone. The token grants access to those three endpoints only; every other
+> endpoint (the dashboard, member management, settings) still requires the
+> admin username and password.
+>
+> Rotate it at any time by editing `bootstrap_token` in
+> `server/config.json` and restarting the service.
 
 ---
 
@@ -188,7 +205,8 @@ The script uses Windows' built-in C# compiler (`csc.exe`) and generates `OpenMes
 ```
 OpenMesh-Gaming/
 ├── LICENSE                    # MIT License
-├── README.md                  # Comprehensive Documentation
+├── README.md                  # Comprehensive Documentation (English)
+├── README.fa.md               # Comprehensive Documentation (Persian)
 ├── .gitignore                 # Binary, credential & secret exclusions
 ├── docs/
 │   ├── ARCHITECTURE.md        # Technical Mesh & Moon Deep Dive
@@ -196,6 +214,7 @@ OpenMesh-Gaming/
 ├── server/
 │   ├── install.sh             # 1-Click Automated Linux Installer
 │   ├── uninstall.sh           # Clean Service & Config Uninstaller
+│   ├── update.sh              # In-Place Server Updater
 │   ├── server.py              # Zero-Dependency Python 3 Dashboard & Web API
 │   ├── config.example.json    # Example configuration file
 │   └── openmesh-server.service# Systemd Unit File template
@@ -211,9 +230,11 @@ OpenMesh-Gaming/
 
 ## 🔒 Security & Privacy Notice
 
-- **No Data Leakage:** This repository is clean of any hardcoded private keys, passwords, node IDs, or personal IP addresses.
-- **Admin Password:** Your dashboard credentials are stored locally in `/opt/openmesh/config.json`.
+- **No Data Leakage:** This repository contains no hardcoded private keys, passwords, node IDs, or personal IP addresses.
+- **No hardcoded credentials:** The dashboard password is generated or entered at install time and stored in `/opt/openmesh/config.json` — never in source code.
+- **Default-password warning:** If the dashboard is started with the built-in default password, it prints a loud warning on startup. **Change it before exposing port 8080 to the Internet.**
 - **Zero Cloud Tracking:** All telemetry, member lists, and network keys remain strictly on your own hardware.
+- **HTTPS note:** The dashboard uses HTTP Basic Auth. For Internet exposure, put it behind a reverse proxy with TLS, or restrict access by VPN/firewall.
 
 ---
 
