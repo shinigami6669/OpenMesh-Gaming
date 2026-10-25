@@ -9,6 +9,7 @@ using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Reflection;
 using System.ServiceProcess;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -99,6 +100,13 @@ namespace OpenMesh.Gaming.Client
         private long lastHandledKickTs = 0;
         private string localNodeId = "";
         private HashSet<string> previousBannedMembers = new HashSet<string>();
+
+        // ---- Control channel (loopback HTTP) ----
+        private ControlServer controlServer = null;
+        private readonly object logBufferLock = new object();
+        private readonly System.Collections.Generic.Queue<string> logBuffer =
+            new System.Collections.Generic.Queue<string>();
+        private const int LOG_BUFFER_MAX = 500;
 
         private string serverStatusState = "disconnected"; // "disconnected", "online", "offline", "blocked"
         private long? lastServerPing = null;
@@ -544,6 +552,40 @@ namespace OpenMesh.Gaming.Client
             UpdateStatusCardsText();
         }
 
+        protected override void OnFormClosing(FormClosingEventArgs e)
+        {
+            try
+            {
+                if (controlServer != null)
+                {
+                    controlServer.Stop();
+                    controlServer = null;
+                }
+            }
+            catch { }
+            base.OnFormClosing(e);
+        }
+
+        protected override void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
+            try
+            {
+                int port = 0;
+                if (!int.TryParse(Environment.GetEnvironmentVariable("OPENMESH_CONTROL_PORT"), out port) || port <= 0)
+                {
+                    port = 17871;
+                }
+                controlServer = new ControlServer(this, port);
+                controlServer.Start();
+                AppendLog("Control channel listening on http://127.0.0.1:" + port, activeTheme.AccentServer);
+            }
+            catch (Exception ex)
+            {
+                Log("Control channel unavailable: " + ex.Message, Color.FromArgb(239, 68, 68));
+            }
+        }
+
         private void UpdateConnectButtonText()
         {
             bool isFa = (currentLanguage == "fa");
@@ -726,15 +768,203 @@ namespace OpenMesh.Gaming.Client
             if (this.IsDisposed || !this.IsHandleCreated) return;
             if (this.InvokeRequired)
             {
+                // Hand the whole job to the UI thread: recording it here as
+                // well would put every line into the log twice.
                 PostToUi(() => Log(message, color));
                 return;
             }
+            // Mirror into the ring buffer so the control channel can serve
+            // the log without depending on the RichTextBox.
+            RecordToBuffer(message);
 
             txtLog.SelectionStart = txtLog.TextLength;
             txtLog.SelectionLength = 0;
             txtLog.SelectionColor = color ?? activeTheme.TermText;
             txtLog.AppendText(string.Format("[{0:HH:mm:ss}] {1}\n", DateTime.Now, message));
             txtLog.ScrollToCaret();
+        }
+
+        // ============================================================
+        //  Control channel bridge
+        //  These are called from the ControlServer thread, so anything
+        //  touching UI state is marshalled onto the UI thread.
+        // ============================================================
+
+        public void RunOnUi(MethodInvoker action)
+        {
+            try
+            {
+                if (IsDisposed || !IsHandleCreated) return;
+                if (InvokeRequired)
+                {
+                    BeginInvoke(action);
+                }
+                else
+                {
+                    action();
+                }
+            }
+            catch (Exception ex)
+            {
+                AppendLog("Control channel could not reach the UI: " + ex.Message, Color.FromArgb(239, 68, 68));
+            }
+        }
+
+        /// <summary>Store a line in the ring buffer without touching the UI.</summary>
+        private void RecordToBuffer(string message)
+        {
+            try
+            {
+                string line = string.Format("[{0:HH:mm:ss}] {1}", DateTime.Now, message);
+                lock (logBufferLock)
+                {
+                    logBuffer.Enqueue(line);
+                    while (logBuffer.Count > LOG_BUFFER_MAX) logBuffer.Dequeue();
+                }
+            }
+            catch { }
+        }
+
+        /// <summary>Append to the terminal and to the ring buffer that /log serves.</summary>
+        public void AppendLog(string message, Color color)
+        {
+            Log(message, color);
+        }
+
+        /// <summary>The recent log, newest last. Used by the /log endpoint.</summary>
+        public string GetRecentLog()
+        {
+            lock (logBufferLock)
+            {
+                return string.Join("\n", logBuffer.ToArray());
+            }
+        }
+
+        private static string JsonEscape(string s)
+        {
+            if (s == null) return "";
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < s.Length; i++)
+            {
+                char c = s[i];
+                switch (c)
+                {
+                    case '"': sb.Append("\\\""); break;
+                    case '\\': sb.Append("\\\\"); break;
+                    case '\n': sb.Append("\\n"); break;
+                    case '\r': sb.Append("\\r"); break;
+                    case '\t': sb.Append("\\t"); break;
+                    default:
+                        if (c < 0x20) sb.Append("\\u").Append(((int)c).ToString("x4"));
+                        else sb.Append(c);
+                        break;
+                }
+            }
+            return sb.ToString();
+        }
+
+        /// <summary>A JSON snapshot of everything the control channel exposes.</summary>
+        public string BuildStatusJson()
+        {
+            string nodeId = localNodeId ?? "";
+            string j = "{";
+            j += "\"connected\":" + (isConnected ? "true" : "false") + ",";
+            j += "\"connecting\":" + (isConnecting ? "true" : "false") + ",";
+            j += "\"busy\":" + (isBusy ? "true" : "false") + ",";
+            j += "\"banned\":" + (isBanned ? "true" : "false") + ",";
+            j += "\"serverAddress\":\"" + JsonEscape(serverAddress) + "\",";
+            j += "\"serverPort\":" + serverWebPort.ToString() + ",";
+            j += "\"networkId\":\"" + JsonEscape(networkId) + "\",";
+            j += "\"serverVirtualIp\":\"" + JsonEscape(serverVirtualIp) + "\",";
+            j += "\"peerVirtualIp\":\"" + JsonEscape(peerVirtualIp) + "\",";
+            j += "\"nodeId\":\"" + JsonEscape(nodeId) + "\",";
+            j += "\"language\":\"" + JsonEscape(currentLanguage) + "\",";
+            j += "\"serverState\":\"" + JsonEscape(serverStatusState) + "\",";
+            j += "\"hostState\":\"" + JsonEscape(hostStatusState) + "\",";
+            j += "\"clientState\":\"" + JsonEscape(clientStatusState) + "\",";
+            j += "\"lastServerPingMs\":" + (lastServerPing.HasValue ? lastServerPing.Value.ToString() : "null") + ",";
+            j += "\"lastHostPingMs\":" + (lastHostPing.HasValue ? lastHostPing.Value.ToString() : "null") + ",";
+            j += "\"controlPort\":" + (controlServer != null ? controlServer.Port.ToString() : "0") + ",";
+            j += "\"controlToken\":\"" + JsonEscape(controlServer != null ? controlServer.Token : "") + "\"";
+            j += "}";
+            return j;
+        }
+
+        /// <summary>Reuse the button's own connect/disconnect path.</summary>
+        public void TriggerConnect()
+        {
+            if (isConnected) { TriggerDisconnect(); return; }
+            ToggleConnectionAsync();
+        }
+
+        public void TriggerDisconnect()
+        {
+            if (!isConnected) { AppendLog("Control channel: not connected, nothing to disconnect.", activeTheme.AccentClient); return; }
+            ToggleConnectionAsync();
+        }
+
+        public void TriggerCancel()
+        {
+            if (!isConnecting) { AppendLog("Control channel: no connection attempt in progress.", activeTheme.AccentClient); return; }
+            ToggleConnectionAsync();
+        }
+
+        public void TriggerManualPing()
+        {
+            RunManualPingAsync();
+        }
+
+        public void TriggerService(string action)
+        {
+            ToggleServiceAsync();
+        }
+
+        public void TriggerQuit()
+        {
+            try
+            {
+                BeginInvoke(new MethodInvoker(delegate { Close(); }));
+            }
+            catch { }
+        }
+
+        /// <summary>
+        /// Apply settings pushed over the control channel. The body is a
+        /// simple form-encoded string: key=value&amp;key=value
+        /// </summary>
+        public string ApplyControlSettings(string body)
+        {
+            if (body == null) return "no settings supplied";
+
+            string addr = null, tok = null;
+            int port = -1;
+
+            string[] parts = body.Replace("&", "\n").Split('\n');
+            for (int i = 0; i < parts.Length; i++)
+            {
+                string kv = parts[i].Trim();
+                if (kv.Length == 0) continue;
+                int eq = kv.IndexOf('=');
+                if (eq <= 0) continue;
+                string k = kv.Substring(0, eq).Trim().ToLowerInvariant();
+                string v = kv.Substring(eq + 1).Trim();
+                if (k == "serveraddress") addr = v;
+                else if (k == "serverport") { int t; if (int.TryParse(v, out t)) port = t; }
+                else if (k == "bootstraptoken") tok = v;
+            }
+
+            if (addr == null && port < 0 && tok == null) return "nothing to change";
+
+            if (addr != null) serverAddress = addr;
+            if (port > 0 && port < 65536) serverWebPort = port;
+            if (tok != null) bootstrapToken = tok;
+
+            SaveLocalConfig();
+            AppendLog(string.Format("Control channel updated settings: server={0}:{1}",
+                serverAddress, serverWebPort), activeTheme.AccentClient);
+
+            return string.Format("settings applied: server={0}:{1} token={2}",
+                serverAddress, serverWebPort, (tok != null ? "set" : "unchanged"));
         }
 
         private string GetZtCliPath()
@@ -1132,7 +1362,10 @@ namespace OpenMesh.Gaming.Client
             try
             {
                 string checkUrl = string.Format("http://{0}:{1}/api/client_check{2}", targetHost, serverWebPort, string.IsNullOrEmpty(myNodeId) ? "" : "?id=" + myNodeId);
-                using (TimeoutWebClient wc = new TimeoutWebClient(8000))
+                // The bootstrap token has to travel with this request too:
+                // the server gates /api/client_check on it for clients that
+                // are not yet authorized members of the mesh.
+                using (TimeoutWebClient wc = new TimeoutWebClient(8000, bootstrapToken))
                 {
                     string json = wc.DownloadString(checkUrl);
                     var mNet = Regex.Match(json, @"""networkId"":\s*""([0-9a-fA-F]{16})""");

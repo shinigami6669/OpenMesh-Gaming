@@ -237,3 +237,67 @@ OpenMesh-Gaming/
 ## 📜 مجوز
 
 این پروژه تحت [مجوز MIT](LICENSE) منتشر شده است.
+
+## کنترل کلاینت با اسکریپت (کانال کنترل)
+
+کلاینت ویندوز یک کانال کنترل HTTP کوچک روی `127.0.0.1:17871` ارائه
+می‌دهد تا بتوانید به‌جای کلیک دستی، با اسکریپت آن را کنترل کنید.
+این کانال فقط روی لوپ‌بک گوش می‌دهد و هر درخواست باید توکن مشترک را
+داشته باشد، پس هیچ چیز بیرون از این دستگاه به آن دسترسی ندارد.
+
+توکن در نخستین اجرا ساخته می‌شود و در این مسیر ذخیره می‌گردد:
+
+```
+%AppData%\OpenMeshGaming\control_token.txt
+```
+
+دو اسکریپت آماده همراه کلاینت ارائه شده است:
+
+```
+control\omc.sh      # bash / Git-Bash
+control\omc.ps1     # PowerShell
+```
+
+```bash
+./control/omc.sh status              # وضعیت به‌صورت JSON
+./control/omc.sh log                 # لاگ اخیر کلاینت
+./control/omc.sh connect             # ورود به LAN گیمینگ
+./control/omc.sh disconnect          # خروج از LAN گیمینگ
+./control/omc.sh cancel              # لغو فرآیند اتصال در جریان
+./control/omc.sh ping                # اجرای پینگ دستی
+./control/omc.sh service             # روشن/خاموش کردن سرویس ZeroTier
+./control/omc.sh settings server=192.168.31.96 port=8080 token=XXXX
+./control/omc.sh quit                # بستن کلاینت
+```
+
+```powershell
+.\control\omc.ps1 status
+.\control\omc.ps1 connect
+.\control\omc.ps1 log
+```
+
+### HTTP خام
+
+```
+GET  /status       وضعیت فعلی به‌صورت JSON
+GET  /log          لاگ اخیر کلاینت
+GET  /token        توکن کنترل
+POST /connect      شروع فرآیند اتصال
+POST /disconnect   قطع اتصال
+POST /cancel       لغو اتصال در جریان
+POST /ping         اجرای پینگ دستی
+POST /service      روشن/خاموش کردن سرویس ZeroTier
+POST /settings     تنظیم آدرس سرور / پورت / توکن bootstrap و ذخیره
+POST /quit         بستن کلاینت
+```
+
+توکن را می‌توانید در هدر `X-OpenMesh-Control`، به‌صورت
+`Authorization: Bearer <token>`، یا در پارامتر `?token=` بفرستید.
+
+```bash
+TOKEN=$(cat "$APPDATA/OpenMeshGaming/control_token.txt")
+curl -s -H "X-OpenMesh-Control: $TOKEN" http://127.0.0.1:17871/status
+```
+
+پورت را می‌توان با متغیر محیطی `OPENMESH_CONTROL_PORT` تغییر داد.
+

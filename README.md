@@ -241,3 +241,68 @@ OpenMesh-Gaming/
 ## 📜 License
 
 This project is licensed under the **MIT License** - see the [LICENSE](LICENSE) file for details.
+
+## Scripting the client (control channel)
+
+The Windows client exposes a small HTTP control channel on `127.0.0.1:17871`
+so it can be driven by scripts instead of by hand. It binds to loopback
+only, and every request has to carry the shared token, so nothing outside
+the machine can reach it.
+
+The token is created on first launch and stored at:
+
+```
+%AppData%\OpenMeshGaming\control_token.txt
+```
+
+Two ready-made helpers ship with the client:
+
+```
+control\omc.sh      # bash / Git-Bash
+control\omc.ps1     # PowerShell
+```
+
+```bash
+./control/omc.sh status              # state as JSON
+./control/omc.sh log                 # the recent client log
+./control/omc.sh connect             # join the gaming LAN
+./control/omc.sh disconnect          # leave the gaming LAN
+./control/omc.sh cancel              # cancel a connection attempt in flight
+./control/omc.sh ping                # run a manual ping
+./control/omc.sh service             # toggle the ZeroTier service
+./control/omc.sh settings server=192.168.31.96 port=8080 token=XXXX
+./control/omc.sh quit                # close the client
+```
+
+```powershell
+.\control\omc.ps1 status
+.\control\omc.ps1 connect
+.\control\omc.ps1 log
+```
+
+### Raw HTTP
+
+```
+GET  /status       current state as JSON
+GET  /log          the recent client log
+GET  /token        the control token
+POST /connect      start the connect flow
+POST /disconnect   disconnect
+POST /cancel       cancel an in-flight connect
+POST /ping         run a manual ping
+POST /service      start/stop the ZeroTier service
+POST /settings     set server address / port / bootstrap token, then save
+POST /quit         close the client
+```
+
+Pass the token in the `X-OpenMesh-Control` header, as
+`Authorization: Bearer <token>`, or as a `?token=` query parameter.
+
+```bash
+TOKEN=$(cat "$APPDATA/OpenMeshGaming/control_token.txt")
+curl -s -H "X-OpenMesh-Control: $TOKEN" http://127.0.0.1:17871/status
+```
+
+The port can be changed with the `OPENMESH_CONTROL_PORT` environment
+variable.
+

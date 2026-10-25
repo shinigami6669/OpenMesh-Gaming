@@ -32,7 +32,8 @@ set "SRC_DIR=%~dp0src"
     /win32manifest:"%SRC_DIR%\app.manifest" ^
     /r:System.dll,System.Drawing.dll,System.Windows.Forms.dll,System.ServiceProcess.dll ^
     /out:"%OUT_EXE%" ^
-    "%SRC_DIR%\Program.cs"
+    "%SRC_DIR%\Program.cs" ^
+    "%SRC_DIR%\ControlServer.cs"
 
 if %ERRORLEVEL% equ 0 (
     echo.
