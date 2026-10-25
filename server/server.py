@@ -21,9 +21,13 @@ import re
 import hmac
 import ipaddress
 
-CONFIG_FILE = os.environ.get('OPENMESH_CONFIG', '/opt/openmesh/config.json')
-ZT_DIR = '/var/lib/zerotier-one'
+# The config lives next to server.py unless the environment overrides it.
+# Hard-coding a fixed path here meant that any deployment that kept its
+# files somewhere else silently fell back to the built-in defaults - and
+# therefore to the published default password.
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_FILE = os.environ.get('OPENMESH_CONFIG', os.path.join(APP_DIR, 'config.json'))
+ZT_DIR = '/var/lib/zerotier-one'
 BANNED_FILE = os.path.join(APP_DIR, 'banned_members.json')
 IP_TRACK_FILE = os.path.join(APP_DIR, 'current_ip.txt')
 
