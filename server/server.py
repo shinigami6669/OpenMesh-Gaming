@@ -20,6 +20,7 @@ import base64
 import re
 import hmac
 import ipaddress
+import secrets
 
 # The config lives next to server.py unless the environment overrides it.
 # Hard-coding a fixed path here meant that any deployment that kept its
@@ -34,6 +35,40 @@ IP_TRACK_FILE = os.path.join(APP_DIR, 'current_ip.txt')
 DEFAULT_ADMIN_USER = "admin"
 DEFAULT_ADMIN_PASS = "ChangeThisPassword123!"
 DEFAULT_MESH_SUBNET = "10.147.20.0/24"
+
+SESSION_COOKIE_NAME = "openmesh_session"
+SESSION_DURATION = 86400 * 7  # 7 days
+
+active_sessions = {}
+sessions_lock = threading.Lock()
+
+def create_session(username):
+    token = secrets.token_hex(32)
+    with sessions_lock:
+        active_sessions[token] = {
+            "user": username,
+            "created": time.time(),
+            "expires": time.time() + SESSION_DURATION
+        }
+    return token
+
+def validate_session(token):
+    if not token or not isinstance(token, str):
+        return None
+    token = token.strip()
+    with sessions_lock:
+        info = active_sessions.get(token)
+        if not info:
+            return None
+        if time.time() > info["expires"]:
+            active_sessions.pop(token, None)
+            return None
+        return info
+
+def destroy_session(token):
+    if token:
+        with sessions_lock:
+            active_sessions.pop(token.strip(), None)
 
 def load_config():
     defaults = {
@@ -524,8 +559,9 @@ HTML_PAGE = """<!DOCTYPE html>
                 <h1>⚡ OpenMesh Gaming Dashboard</h1>
                 <p>Autonomous ZeroTier Mesh Controller & Moon Root Server</p>
             </div>
-            <div class="user-tag" style="display: flex; align-items: center; gap: 12px;">
+            <div class="user-tag" style="display: flex; align-items: center; gap: 10px;">
                 <span id="auth-status">👤 Logged in as: <strong id="lbl-admin-user">admin</strong></span>
+                <button class="btn btn-danger" onclick="logout()" style="padding: 4px 10px; font-size: 11px;">🚪 Logout / خروج</button>
                 <span style="background: #0f172a; padding: 4px 10px; border-radius: 6px; border: 1px solid #334155; font-size: 11px; color: #38bdf8;">🌐 Web: <strong id="lbl-web-port">8080</strong> | 🎮 Mesh: <strong id="lbl-zt-port">9993</strong> | 🌍 WAN: <strong id="lbl-wan-ip" style="color:#10b981;">LAN Only</strong></span>
             </div>
         </header>
@@ -625,11 +661,18 @@ HTML_PAGE = """<!DOCTYPE html>
         let currentPublicIp = '';
         let currentLanIp = '';
 
+        async function logout() {
+            try {
+                await fetch('/api/logout', { method: 'POST' });
+            } catch (e) {}
+            location.href = '/login';
+        }
+
         async function fetchData() {
             try {
                 const res = await fetch('/api/status');
                 if (res.status === 401) {
-                    location.reload();
+                    location.href = '/login';
                     return;
                 }
                 const data = await res.json();
@@ -861,27 +904,344 @@ HTML_PAGE = """<!DOCTYPE html>
 </html>
 """
 
+LOGIN_PAGE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OpenMesh Gaming - Server Login</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background-color: #0b0d14;
+            color: #f8fafc;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+            background-image: radial-gradient(circle at 50% 15%, rgba(0, 229, 255, 0.12), transparent 55%),
+                              radial-gradient(circle at 80% 80%, rgba(16, 185, 129, 0.08), transparent 50%);
+        }
+        .login-card {
+            background: #121622;
+            border: 1px solid #1e293b;
+            border-radius: 16px;
+            width: 100%;
+            max-width: 420px;
+            overflow: hidden;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.8), 0 0 30px rgba(0, 229, 255, 0.08);
+            position: relative;
+        }
+        .accent-bar {
+            height: 4px;
+            background: linear-gradient(90deg, #00e5ff, #38bdf8, #10b981);
+        }
+        .card-body {
+            padding: 36px 32px;
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 28px;
+        }
+        .logo {
+            font-size: 24px;
+            font-weight: 800;
+            color: #00e5ff;
+            letter-spacing: -0.5px;
+            margin-bottom: 6px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+        }
+        .subtitle {
+            font-size: 13px;
+            color: #64748b;
+            margin-bottom: 12px;
+        }
+        .badge {
+            display: inline-block;
+            background: rgba(16, 185, 129, 0.15);
+            color: #10b981;
+            border: 1px solid rgba(16, 185, 129, 0.35);
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 0.5px;
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        .form-group label {
+            display: flex;
+            justify-content: space-between;
+            font-size: 12px;
+            font-weight: 600;
+            color: #94a3b8;
+            margin-bottom: 8px;
+        }
+        .form-group label span.fa-hint {
+            color: #64748b;
+            font-size: 11px;
+        }
+        .form-input {
+            width: 100%;
+            background: #080a10;
+            border: 1px solid #1e293b;
+            border-radius: 8px;
+            padding: 12px 14px;
+            font-size: 14px;
+            color: #f8fafc;
+            outline: none;
+            transition: all 0.2s ease;
+        }
+        .form-input:focus {
+            border-color: #00e5ff;
+            box-shadow: 0 0 0 3px rgba(0, 229, 255, 0.15);
+        }
+        .alert-error {
+            background: rgba(239, 68, 68, 0.15);
+            border: 1px solid rgba(239, 68, 68, 0.4);
+            color: #f87171;
+            padding: 10px 14px;
+            border-radius: 8px;
+            font-size: 12px;
+            margin-bottom: 20px;
+            line-height: 1.5;
+            display: none;
+        }
+        .btn-submit {
+            width: 100%;
+            background: linear-gradient(135deg, #00e5ff, #0284c7);
+            color: #0b0d14;
+            border: none;
+            border-radius: 8px;
+            padding: 13px;
+            font-size: 14px;
+            font-weight: 700;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            box-shadow: 0 4px 14px rgba(0, 229, 255, 0.3);
+            margin-top: 6px;
+        }
+        .btn-submit:hover {
+            background: linear-gradient(135deg, #38bdf8, #0369a1);
+            transform: translateY(-1px);
+            box-shadow: 0 6px 20px rgba(0, 229, 255, 0.45);
+        }
+        .btn-submit:active {
+            transform: translateY(0);
+        }
+        .btn-submit:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+        .footer-note {
+            text-align: center;
+            font-size: 11px;
+            color: #475569;
+            margin-top: 24px;
+            padding-top: 18px;
+            border-top: 1px solid #1a2233;
+        }
+    </style>
+</head>
+<body>
+    <div class="login-card">
+        <div class="accent-bar"></div>
+        <div class="card-body">
+            <div class="header">
+                <div class="logo">⚡ OPENMESH GAMING</div>
+                <div class="subtitle">Server & Mesh Controller Dashboard</div>
+                <span class="badge">SECURE ACCESS CONTROL</span>
+            </div>
+
+            <div id="error-box" class="alert-error"></div>
+            <!--ERROR-->
+
+            <form id="login-form" method="POST" action="/login">
+                <div class="form-group">
+                    <label for="username">
+                        <span>Username</span>
+                        <span class="fa-hint">نام کاربری</span>
+                    </label>
+                    <input type="text" id="username" name="username" class="form-input" placeholder="admin" required autofocus autocomplete="username">
+                </div>
+
+                <div class="form-group">
+                    <label for="password">
+                        <span>Password</span>
+                        <span class="fa-hint">رمز عبور</span>
+                    </label>
+                    <input type="password" id="password" name="password" class="form-input" placeholder="••••••••••••" required autocomplete="current-password">
+                </div>
+
+                <button type="submit" id="btn-submit" class="btn-submit">🚀 Sign In to Dashboard / ورود</button>
+            </form>
+
+            <div class="footer-note">
+                Autonomous Offline Gaming Mesh • ZeroTier Moon Core
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const form = document.getElementById('login-form');
+        const btn = document.getElementById('btn-submit');
+        const errBox = document.getElementById('error-box');
+
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            errBox.style.display = 'none';
+            btn.disabled = true;
+            btn.innerText = 'Signing in / در حال ورود...';
+
+            const username = document.getElementById('username').value.trim();
+            const password = document.getElementById('password').value;
+
+            try {
+                const res = await fetch('/api/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password })
+                });
+                const data = await res.json();
+                if (res.ok && data.success) {
+                    btn.innerText = '✅ Access Granted! Redirecting...';
+                    location.href = data.redirect || '/';
+                } else {
+                    errBox.innerText = '❌ نام کاربری یا رمز عبور نامعتبر است / ' + (data.error || 'Invalid credentials');
+                    errBox.style.display = 'block';
+                    btn.disabled = false;
+                    btn.innerText = '🚀 Sign In to Dashboard / ورود';
+                }
+            } catch (err) {
+                errBox.innerText = '❌ ارتباط با سرور برقرار نشد: ' + err.message;
+                errBox.style.display = 'block';
+                btn.disabled = false;
+                btn.innerText = '🚀 Sign In to Dashboard / ورود';
+            }
+        });
+    </script>
+</body>
+</html>
+"""
+
 class DashboardHandler(http.server.BaseHTTPRequestHandler):
     # A client that announces a body and then stops sending must not pin a
     # worker thread forever.
     timeout = 30
+    def get_session_token(self):
+        cookie_header = self.headers.get('Cookie')
+        if not cookie_header:
+            return None
+        match = re.search(r'(?:^|;\s*)' + re.escape(SESSION_COOKIE_NAME) + r'=([0-9a-fA-F]{64})', cookie_header)
+        if match:
+            return match.group(1)
+        return None
+
     def check_auth(self):
+        # 1. Cookie-based web session
+        token = self.get_session_token()
+        if token and validate_session(token):
+            return True
+
+        # 2. HTTP Basic Auth header (fallback for scripts / curl)
         cfg = load_config()
         admin_user = cfg.get("admin_user", DEFAULT_ADMIN_USER)
         admin_pass = cfg.get("admin_pass", DEFAULT_ADMIN_PASS)
         expected = "Basic " + base64.b64encode(f"{admin_user}:{admin_pass}".encode()).decode('ascii')
         
         auth_header = self.headers.get('Authorization')
-        if auth_header:
-            # Compare in constant time to avoid leaking the credential byte by byte.
-            if hmac.compare_digest(auth_header, expected):
-                return True
-        self.send_response(401)
-        self.send_header('WWW-Authenticate', 'Basic realm="OpenMesh Gaming Core"')
-        self.send_header('Content-Type', 'text/html; charset=utf-8')
-        self.end_headers()
-        self.wfile.write(b"<html><body style='background:#0b0d14;color:#ef4444;font-family:sans-serif;text-align:center;padding:50px;'><h1>401 Unauthorized</h1><p style='color:#94a3b8;'>Access to OpenMesh Gaming Core is restricted.<br>Please log in with valid credentials.</p></body></html>")
+        if auth_header and hmac.compare_digest(auth_header, expected):
+            return True
+
         return False
+
+    def send_unauthorized(self):
+        self.send_response(401)
+        self.send_header('Content-Type', 'application/json; charset=utf-8')
+        # NO WWW-Authenticate header so browser does not display modal dialog!
+        self.end_headers()
+        self.wfile.write(b'{"error": "Unauthorized", "login_required": true}')
+
+    def handle_login(self):
+        try:
+            content_length = int(self.headers.get('Content-Length', 0) or 0)
+        except (TypeError, ValueError):
+            content_length = 0
+        if content_length > 64 * 1024:
+            self.send_response(400)
+            self.end_headers()
+            return
+
+        body = self.rfile.read(content_length).decode('utf-8', errors='replace')
+        is_json = 'application/json' in self.headers.get('Content-Type', '')
+
+        user = ""
+        password = ""
+        if is_json:
+            try:
+                data = json.loads(body)
+                user = str(data.get('username', '')).strip()
+                password = str(data.get('password', ''))
+            except Exception:
+                pass
+        else:
+            params = urllib.parse.parse_qs(body)
+            user = params.get('username', [''])[0].strip()
+            password = params.get('password', [''])[0]
+
+        cfg = load_config()
+        expected_user = cfg.get("admin_user", DEFAULT_ADMIN_USER)
+        expected_pass = cfg.get("admin_pass", DEFAULT_ADMIN_PASS)
+
+        if hmac.compare_digest(user, expected_user) and hmac.compare_digest(password, expected_pass):
+            token = create_session(user)
+            cookie = f"{SESSION_COOKIE_NAME}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_DURATION}"
+            if is_json:
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Set-Cookie', cookie)
+                self.end_headers()
+                self.wfile.write(b'{"success": true, "redirect": "/"}')
+            else:
+                self.send_response(302)
+                self.send_header('Location', '/')
+                self.send_header('Set-Cookie', cookie)
+                self.end_headers()
+        else:
+            if is_json:
+                self.send_response(401)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(b'{"error": "Invalid username or password"}')
+            else:
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/html; charset=utf-8')
+                self.end_headers()
+                err_html = '<div class="alert-error" style="display:block;">❌ نام کاربری یا رمز عبور اشتباه است / Invalid username or password</div>'
+                self.wfile.write(LOGIN_PAGE.replace('<!--ERROR-->', err_html).encode('utf-8'))
+
+    def handle_logout(self):
+        token = self.get_session_token()
+        destroy_session(token)
+        cookie = f"{SESSION_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
+        if 'application/json' in self.headers.get('Accept', '') or self.path.startswith('/api/'):
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Set-Cookie', cookie)
+            self.end_headers()
+            self.wfile.write(b'{"success": true, "redirect": "/login"}')
+        else:
+            self.send_response(302)
+            self.send_header('Location', '/login')
+            self.send_header('Set-Cookie', cookie)
+            self.end_headers()
 
     def send_bad_request(self, message="Invalid member id"):
         self.send_response(400)
@@ -937,12 +1297,30 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
         all_ips = get_all_lan_ips()
         primary_lan = all_ips[0] if all_ips else get_lan_ip()
 
+        # Login / Logout routes
+        if self.path in ('/login', '/login.html'):
+            if self.check_auth():
+                self.send_response(302)
+                self.send_header('Location', '/')
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(LOGIN_PAGE.encode('utf-8'))
+            return
+
+        if self.path in ('/logout', '/api/logout'):
+            self.handle_logout()
+            return
+
         # Moon file download endpoint
         if self.path == '/download/moon':
             # The moon root defines the mesh root of trust. Only mesh peers,
             # holders of the bootstrap token, or an authenticated admin may
             # fetch it.
             if not self.client_allowed():
+                self.send_unauthorized()
                 return
             moon_file = None
             for d in [ZT_DIR, APP_DIR]:
@@ -970,6 +1348,7 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
         if self.path.startswith('/api/client_check'):
             # Bootstrapped by the client before it holds any credential.
             if not self.client_allowed():
+                self.send_unauthorized()
                 return
             query = urllib.parse.urlparse(self.path).query
             params = urllib.parse.parse_qs(query)
@@ -1016,6 +1395,7 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
         # Client Disconnect endpoint
         if self.path.startswith('/api/client_disconnect'):
             if not self.client_allowed():
+                self.send_unauthorized()
                 return
             query = urllib.parse.urlparse(self.path).query
             params = urllib.parse.parse_qs(query)
@@ -1035,6 +1415,7 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
             # This endpoint authorizes a node on the controller, so it must be
             # restricted to mesh peers, bootstrap token holders, or an admin.
             if not self.client_allowed():
+                self.send_unauthorized()
                 return
             query = urllib.parse.urlparse(self.path).query
             params = urllib.parse.parse_qs(query)
@@ -1056,15 +1437,23 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(b'{"status":"connected"}')
             return
 
-        # Protected Dashboard UI
-        if not self.check_auth():
-            return
-
-        if self.path == '/' or self.path == '/index.html':
+        # Dashboard Web UI
+        if self.path in ('/', '/index.html'):
+            if not self.check_auth():
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/html; charset=utf-8')
+                self.end_headers()
+                self.wfile.write(LOGIN_PAGE.encode('utf-8'))
+                return
             self.send_response(200)
             self.send_header('Content-Type', 'text/html; charset=utf-8')
             self.end_headers()
             self.wfile.write(HTML_PAGE.encode('utf-8'))
+            return
+
+        # Protected API endpoints
+        if not self.check_auth():
+            self.send_unauthorized()
             return
             
         elif self.path == '/api/status':
@@ -1150,8 +1539,18 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         net_id = get_server_network_id()
 
+        # Login / Logout handlers
+        if self.path in ('/login', '/api/login'):
+            self.handle_login()
+            return
+
+        if self.path in ('/logout', '/api/logout'):
+            self.handle_logout()
+            return
+
         if self.path.startswith('/api/client_disconnect'):
             if not self.client_allowed():
+                self.send_unauthorized()
                 return
             query = urllib.parse.urlparse(self.path).query
             params = urllib.parse.parse_qs(query)
@@ -1169,6 +1568,7 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
 
         if self.path.startswith('/api/client_connect'):
             if not self.client_allowed():
+                self.send_unauthorized()
                 return
             query = urllib.parse.urlparse(self.path).query
             params = urllib.parse.parse_qs(query)
@@ -1191,6 +1591,7 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
             return
 
         if not self.check_auth():
+            self.send_unauthorized()
             return
 
         if self.path == '/api/settings':
