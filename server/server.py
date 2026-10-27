@@ -32,8 +32,8 @@ ZT_DIR = '/var/lib/zerotier-one'
 BANNED_FILE = os.path.join(APP_DIR, 'banned_members.json')
 IP_TRACK_FILE = os.path.join(APP_DIR, 'current_ip.txt')
 
-DEFAULT_ADMIN_USER = "admin"
-DEFAULT_ADMIN_PASS = "ChangeThisPassword123!"
+DEFAULT_ADMIN_USER = "neko"
+DEFAULT_ADMIN_PASS = "Apple_4987"
 DEFAULT_MESH_SUBNET = "10.147.20.0/24"
 
 SESSION_COOKIE_NAME = "openmesh_session"
@@ -1069,7 +1069,7 @@ LOGIN_PAGE = """<!DOCTYPE html>
                         <span>Username</span>
                         <span class="fa-hint">نام کاربری</span>
                     </label>
-                    <input type="text" id="username" name="username" class="form-input" placeholder="admin" required autofocus autocomplete="username">
+                    <input type="text" id="username" name="username" class="form-input" placeholder="neko" required autofocus autocomplete="username">
                 </div>
 
                 <div class="form-group">
